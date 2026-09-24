@@ -82,3 +82,23 @@ def test_train_injects_missingness_when_rate_positive(tmp_path, monkeypatch):
     )
 
     assert total_loss != 0.0                     # trained with injected missingness, no crash
+
+
+def test_train_widens_features_when_configured(tmp_path, monkeypatch):
+    """With a WideningConfig whose add_features_max > 0, the batch is widened (HDLSS prior)
+    and still trains end-to-end.
+    """
+    from tfmplayground.train import WideningConfig
+
+    monkeypatch.chdir(tmp_path)
+    model = _tiny_model()
+    x = torch.randn(1, 8, 3)                     # 3 features from the prior
+    y = torch.randint(0, 10, (1, 8)).float()
+    prior = _MockPrior([_batch(x, y, y.clone(), tts=5)])
+
+    _, total_loss = train(
+        model, prior, nn.CrossEntropyLoss(), epochs=1, device=torch.device("cpu"), run_name="run",
+        widening=WideningConfig(add_features_min=10, add_features_max=10, sparsity_max=0.1, noise_max=0.5),
+    )
+
+    assert total_loss != 0.0                     # trained on widened features, no crash
