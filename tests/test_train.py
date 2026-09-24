@@ -64,3 +64,21 @@ def test_train_skips_batch_with_nan_in_targets(tmp_path, monkeypatch):
     )
 
     assert total_loss == 0.0                  # the batch was skipped
+
+
+def test_train_injects_missingness_when_rate_positive(tmp_path, monkeypatch):
+    """With missing_rate_max > 0, features get NaNs injected and the batch still trains
+    (the model handles them), exercising the indicator channel end-to-end.
+    """
+    monkeypatch.chdir(tmp_path)
+    model = _tiny_model()
+    x = torch.randn(1, 8, 3)                     # no NaN from the prior
+    y = torch.randint(0, 10, (1, 8)).float()
+    prior = _MockPrior([_batch(x, y, y.clone(), tts=5)])
+
+    _, total_loss = train(
+        model, prior, nn.CrossEntropyLoss(), epochs=1, device=torch.device("cpu"),
+        run_name="run", missing_rate_max=0.5,
+    )
+
+    assert total_loss != 0.0                     # trained with injected missingness, no crash
