@@ -7,6 +7,7 @@ from pfns.bar_distribution import FullSupportBarDistribution
 from torch import nn
 from torch.utils.data import DataLoader
 
+from tfmplayground.augmentation import inject_mcar_missingness
 from tfmplayground.callbacks import Callback
 from tfmplayground.models.nanotabpfn import NanoTabPFNModel
 from tfmplayground.normalization import compute_target_stats_torch, normalize_targets
@@ -25,6 +26,7 @@ def train(
     ckpt: dict[str, torch.Tensor] = None,
     multi_gpu: bool = False,
     run_name: str = "tfmplayground",
+    missing_rate_max: float = 0.0,
 ):
     """
     Trains our model on the given prior using the given criterion.
@@ -70,7 +72,13 @@ def train(
             total_loss = 0.0
             for i, full_data in enumerate(prior):
                 train_test_split_index = full_data["train_test_split_index"]
-                data = (full_data["x"].to(device), full_data["y"][:, :train_test_split_index].to(device))
+                x = full_data["x"].to(device)
+                # Training-time MCAR augmentation: per batch, draw a rate ~ U(0, missing_rate_max)
+                # and set feature cells to NaN, so the model learns to use the missing indicator.
+                if missing_rate_max > 0:
+                    rate = torch.rand(1, device=x.device).item() * missing_rate_max
+                    x = inject_mcar_missingness(x, rate)
+                data = (x, full_data["y"][:, :train_test_split_index].to(device))
                 # Only guard the targets: features with NaNs are handled by the model
                 # (normalize_features imputes them and flags them via the indicator channel),
                 # so dropping feature-NaN batches would throw away trainable missing signal.
