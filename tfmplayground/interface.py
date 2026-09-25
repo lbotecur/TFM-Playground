@@ -160,8 +160,7 @@ class NanoTabPFNClassifier:
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
     ):
-        if device is None:
-            device = get_default_device()
+        device = torch.device(get_default_device() if device is None else device)
         if model is None:
             model = "checkpoints/nanotabpfn.pth"
             if not os.path.isfile(model):
@@ -312,8 +311,7 @@ class NanoTabPFNRegressor:
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
     ):
-        if device is None:
-            device = get_default_device()
+        device = torch.device(get_default_device() if device is None else device)
         if model is None:
             os.makedirs("checkpoints", exist_ok=True)
             model = "checkpoints/nanotabpfn_regressor.pth"
