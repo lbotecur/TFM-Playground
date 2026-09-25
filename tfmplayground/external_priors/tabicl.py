@@ -1,7 +1,7 @@
 """DataLoader and configuration for TabICL-based priors."""
 
 import torch
-from tabicl.prior.dataset import PriorDataset as TabICLPriorDataset
+from tabicl.prior import PriorDataset as TabICLPriorDataset
 from torch.utils.data import DataLoader
 
 
@@ -51,6 +51,7 @@ class TabICLPriorDataLoader(DataLoader):
             min_seq_len=num_datapoints_min,
             max_seq_len=num_datapoints_max,
             prior_type=prior_type,
+            n_jobs=1,  # single-process: tabicl's parallel samplers use unpicklable local closures
         )
 
     def tabicl_to_ours(self, d):
