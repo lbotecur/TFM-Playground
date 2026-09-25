@@ -182,8 +182,11 @@ class NanoTabPFNClassifier:
         self.max_unique_for_categorical = max_unique_for_categorical
         self.min_samples_for_categorical_inference = min_samples_for_categorical_inference
 
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
-        """stores X_train, label-encodes the targets to contiguous indices 0..num_classes-1
+    def fit(self, 
+            X_train: np.ndarray | pd.DataFrame, 
+            y_train: np.ndarray | pd.Series,
+    ):
+        """Stores X_train, label-encodes the targets to contiguous indices 0..num_classes-1
         (so arbitrary labels, e.g. non-contiguous integers or strings, are supported), and
         keeps the original labels in classes_ for decoding predictions"""
         self.feature_preprocessor = get_feature_preprocessor(
@@ -345,7 +348,10 @@ class NanoTabPFNRegressor:
         self.max_unique_for_categorical = max_unique_for_categorical
         self.min_samples_for_categorical_inference = min_samples_for_categorical_inference
 
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
+    def fit(self, 
+            X_train:np.ndarray | pd.DataFrame, 
+            y_train: np.ndarray | pd.Series,
+    ):
         """
         Stores X_train and y_train for later use.
         Computes target normalization.
