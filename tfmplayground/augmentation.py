@@ -150,3 +150,134 @@ def split_widening_budget(cat_mask: torch.Tensor, num_features_to_add: int) -> t
     num_cat_to_add = int(r_cat * num_features_to_add)  # floor for non-negative values
     num_cont_to_add = num_features_to_add - num_cat_to_add
     return num_cont_to_add, num_cat_to_add
+
+
+def sample_target_cardinalities(
+    size: int,
+    max_cats: int,
+    low: int = 3,
+    lam: float = 0.08,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Sample target cardinalities Kj from a discrete exponential distribution (Algorithm 2).
+
+    Each Kj is drawn from {low, ..., max_cats}, with smaller values more likely (bias set by
+    ``lam``). This follows the paper's prose ("sampled from a discrete exponential
+    distribution, biasing towards low-cardinality"); the pseudocode's line 8 instead says
+    uniform -- we follow the prose and the reference implementation.
+
+    Args:
+        size: number of cardinalities to sample (one per new categorical feature), >= 0.
+        max_cats: maximum cardinality (inclusive upper bound, Kmax in the paper), >= 1.
+        low: minimum cardinality (inclusive); clamped down to max_cats if larger.
+        lam: exponential rate; larger biases more strongly towards ``low``.
+        generator: optional torch.Generator for reproducibility.
+
+    Returns:
+        Long tensor of shape (size,) with values in [low, max_cats].
+    """
+    if size < 0:
+        raise ValueError(f"size must be >= 0, got {size}.")
+    if max_cats < 1:
+        raise ValueError(f"max_cats must be >= 1, got {max_cats}.")
+
+    device = generator.device if generator is not None else torch.device("cpu")
+    if size == 0:
+        return torch.empty(0, dtype=torch.long, device=device)
+
+    low = min(low, max_cats)
+    values = torch.arange(low, max_cats + 1, device=device)
+    weights = torch.exp(-lam * (values - low).float())
+    probs = weights / weights.sum()
+    idx = torch.multinomial(probs, num_samples=size, replacement=True, generator=generator)
+    return values[idx]
+
+
+def reduce_cardinality(
+    col: torch.Tensor,
+    max_cats: int,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Reduce a categorical column to at most ``max_cats`` categories (Algorithm 2, lines 9-12).
+
+    Keeps the ``max_cats`` most frequent categories and remaps every rarer category to a
+    uniformly random kept one. This is a vectorised equivalent of the paper's iterative
+    "merge the rarest category into one of the Kj most frequent" loop, with the same end
+    state: at most ``max_cats`` categories, the rare tail absorbed into frequent ones at
+    random. Assumes ``col`` has no NaN (widening runs before missingness injection).
+
+    Args:
+        col: 1D tensor of categorical values.
+        max_cats: maximum number of distinct categories to keep, >= 1.
+        generator: optional torch.Generator for reproducibility.
+
+    Returns:
+        A new 1D tensor, same shape as ``col``, with at most ``max_cats`` distinct values.
+    """
+    if max_cats < 1:
+        raise ValueError(f"max_cats must be >= 1, got {max_cats}.")
+
+    vals, inv = torch.unique(col, return_inverse=True)
+    num_categories = vals.numel()
+    if num_categories <= max_cats:
+        return col.clone()
+
+    counts = torch.bincount(inv, minlength=num_categories)
+    order = torch.argsort(counts)                # ascending: rarest first, most frequent last
+    head = order[-max_cats:]                      # the max_cats most frequent categories (kept)
+    tail = order[:-max_cats]                      # the rarer categories (to be merged away)
+    tgt = torch.randint(0, head.numel(), (tail.numel(),), generator=generator, device=col.device)
+    mapping = torch.arange(num_categories, device=col.device)
+    mapping[tail] = head[tgt]
+    return vals[mapping[inv]]
+
+
+def add_categorical_widening_features(
+    x_cat: torch.Tensor,
+    num_features_to_add: int,
+    sparsity: float,
+    max_cats: int = 20,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Generate new categorical features from existing ones (Algorithm 2, one dataset).
+
+    For each new feature: pick k = max(1, floor(sparsity * m_cat)) donor columns, copy a
+    value from a uniformly random donor per sample (lines 2-6), then reduce the result to a
+    target cardinality Kj drawn from a discrete exponential distribution (lines 8-12).
+
+    Operates on a SINGLE dataset; the batch loop belongs to the mixed widening wrapper,
+    matching the paper's "feature widening is applied independently per dataset".
+
+    Args:
+        x_cat: categorical sub-matrix of one dataset, shape (num_samples, num_categorical).
+        num_features_to_add: number of new categorical features to generate, >= 0.
+        sparsity: donor sparsity p; k = max(1, floor(p * num_categorical)).
+        max_cats: maximum target cardinality Kmax.
+        generator: optional torch.Generator for reproducibility.
+
+    Returns:
+        A new tensor of shape (num_samples, num_features_to_add).
+    """
+    if x_cat.ndim != 2:
+        raise ValueError(f"x_cat must be 2D (num_samples, num_categorical), got {tuple(x_cat.shape)}.")
+    if num_features_to_add < 0:
+        raise ValueError(f"num_features_to_add must be >= 0, got {num_features_to_add}.")
+    if not 0.0 <= sparsity <= 1.0:
+        raise ValueError(f"sparsity must be in [0, 1], got {sparsity}.")
+
+    num_samples, num_categorical = x_cat.shape
+    if num_features_to_add == 0:
+        return x_cat.new_empty((num_samples, 0))
+    if num_categorical == 0:
+        raise ValueError("Cannot generate categorical features without at least one donor column.")
+
+    k = max(1, int(sparsity * num_categorical))
+    target_cards = sample_target_cardinalities(num_features_to_add, max_cats, generator=generator)
+    rows = torch.arange(num_samples, device=x_cat.device)
+    out = x_cat.new_empty((num_samples, num_features_to_add))
+    for j in range(num_features_to_add):
+        donors = torch.randperm(num_categorical, generator=generator, device=x_cat.device)[:k]
+        donor_per_row = torch.randint(0, k, (num_samples,), generator=generator, device=x_cat.device)
+        new_col = x_cat[rows, donors[donor_per_row]]
+        out[:, j] = reduce_cardinality(new_col, int(target_cards[j].item()), generator=generator)
+    return out

@@ -1,7 +1,13 @@
 import pytest
 import torch
 
-from tfmplayground.augmentation import detect_categorical_mask, split_widening_budget
+from tfmplayground.augmentation import (
+    add_categorical_widening_features,
+    detect_categorical_mask,
+    reduce_cardinality,
+    sample_target_cardinalities,
+    split_widening_budget,
+)
 
 
 def test_detect_categorical_threshold_boundary():
@@ -73,3 +79,108 @@ def test_split_budget_rejects_negative_add():
 def test_split_budget_rejects_empty_mask():
     with pytest.raises(ValueError):
         split_widening_budget(torch.zeros(0, dtype=torch.bool), 10)
+
+
+# ---- sample_target_cardinalities ----
+def test_sample_target_cardinalities_range():
+    g = torch.Generator().manual_seed(0)
+    k = sample_target_cardinalities(5000, max_cats=20, generator=g)
+    assert int(k.min()) >= 3 and int(k.max()) <= 20
+
+
+def test_sample_target_cardinalities_biased_low():
+    g = torch.Generator().manual_seed(0)
+    k = sample_target_cardinalities(5000, max_cats=20, generator=g).float()
+    assert k.mean().item() < 11.5   # below the midpoint of [3, 20]: exponential bias to low
+
+
+def test_sample_target_cardinalities_reproducible():
+    g1 = torch.Generator().manual_seed(7)
+    g2 = torch.Generator().manual_seed(7)
+    assert torch.equal(
+        sample_target_cardinalities(50, max_cats=15, generator=g1),
+        sample_target_cardinalities(50, max_cats=15, generator=g2),
+    )
+
+
+def test_sample_target_cardinalities_empty():
+    assert sample_target_cardinalities(0, max_cats=20).shape == (0,)
+
+
+# ---- reduce_cardinality ----
+def test_reduce_cardinality_enforces_bound():
+    col = torch.arange(50.0).repeat_interleave(4)   # 50 distinct values
+    g = torch.Generator().manual_seed(0)
+    out = reduce_cardinality(col, max_cats=8, generator=g)
+    assert out.unique().numel() <= 8
+    assert out.shape == col.shape
+
+
+def test_reduce_cardinality_keeps_original_values():
+    col = torch.arange(50.0).repeat_interleave(4)
+    g = torch.Generator().manual_seed(0)
+    out = reduce_cardinality(col, max_cats=8, generator=g)
+    assert set(out.unique().tolist()).issubset(set(col.unique().tolist()))
+
+
+def test_reduce_cardinality_noop_when_already_small():
+    col = torch.tensor([1.0, 1.0, 2.0, 3.0, 3.0, 3.0])   # 3 distinct
+    assert torch.equal(reduce_cardinality(col, max_cats=10), col)
+
+
+def test_reduce_cardinality_reproducible():
+    col = torch.arange(40.0).repeat_interleave(5)
+    g1 = torch.Generator().manual_seed(3)
+    g2 = torch.Generator().manual_seed(3)
+    assert torch.equal(reduce_cardinality(col, 6, generator=g1), reduce_cardinality(col, 6, generator=g2))
+
+
+# ---- add_categorical_widening_features ----
+def test_add_categorical_widening_shape():
+    x_cat = torch.randint(0, 8, (150, 12)).float()
+    g = torch.Generator().manual_seed(0)
+    out = add_categorical_widening_features(x_cat, 200, sparsity=0.05, max_cats=20, generator=g)
+    assert out.shape == (150, 200)
+
+
+def test_add_categorical_widening_respects_max_cats():
+    x_cat = torch.randint(0, 30, (200, 15)).float()   # donors with up to 30 categories
+    g = torch.Generator().manual_seed(0)
+    out = add_categorical_widening_features(x_cat, 100, sparsity=0.1, max_cats=12, generator=g)
+    per_col_card = torch.tensor([out[:, j].unique().numel() for j in range(out.shape[1])])
+    assert int(per_col_card.max()) <= 12
+
+
+def test_add_categorical_widening_values_from_donors():
+    x_cat = torch.randint(0, 8, (150, 10)).float()
+    g = torch.Generator().manual_seed(0)
+    out = add_categorical_widening_features(x_cat, 50, sparsity=0.3, max_cats=20, generator=g)  # k>1
+    assert set(out.unique().tolist()).issubset(set(x_cat.unique().tolist()))
+
+
+def test_add_categorical_widening_zero_features():
+    x_cat = torch.randint(0, 8, (150, 10)).float()
+    out = add_categorical_widening_features(x_cat, 0, sparsity=0.05, max_cats=20)
+    assert out.shape == (150, 0)
+
+
+def test_add_categorical_widening_does_not_mutate_input():
+    x_cat = torch.randint(0, 8, (150, 10)).float()
+    before = x_cat.clone()
+    add_categorical_widening_features(x_cat, 30, sparsity=0.05, max_cats=20)
+    assert torch.equal(x_cat, before)
+
+
+def test_add_categorical_widening_reproducible():
+    x_cat = torch.randint(0, 8, (150, 10)).float()
+    g1 = torch.Generator().manual_seed(5)
+    g2 = torch.Generator().manual_seed(5)
+    a = add_categorical_widening_features(x_cat, 40, sparsity=0.05, max_cats=20, generator=g1)
+    b = add_categorical_widening_features(x_cat, 40, sparsity=0.05, max_cats=20, generator=g2)
+    assert torch.equal(a, b)
+
+
+def test_add_categorical_widening_requires_donors():
+    x_cat = torch.empty((150, 0))
+    with pytest.raises(ValueError):
+        add_categorical_widening_features(x_cat, 10, sparsity=0.05, max_cats=20)
