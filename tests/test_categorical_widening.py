@@ -3,6 +3,7 @@ import torch
 
 from tfmplayground.augmentation import (
     add_categorical_widening_features,
+    add_mixed_widening_features,
     detect_categorical_mask,
     reduce_cardinality,
     sample_target_cardinalities,
@@ -184,3 +185,74 @@ def test_add_categorical_widening_requires_donors():
     x_cat = torch.empty((150, 0))
     with pytest.raises(ValueError):
         add_categorical_widening_features(x_cat, 10, sparsity=0.05, max_cats=20)
+
+
+# ---- add_mixed_widening_features (integration) ----
+def test_mixed_widening_shape_without_originals():
+    x = torch.randn(3, 50, 12)
+    out = add_mixed_widening_features(x, 200, sparsity=0.05, noise_std=0.5, include_original_prob=0.0)
+    assert out.shape == (3, 50, 200)
+
+
+def test_mixed_widening_shape_with_originals():
+    x = torch.randn(3, 50, 12)
+    out = add_mixed_widening_features(x, 30, sparsity=0.05, noise_std=0.5, include_original_prob=1.0)
+    assert out.shape == (3, 50, 42)   # 30 new + 12 originals
+
+
+def test_mixed_widening_all_continuous():
+    x = torch.randn(3, 50, 12)   # all high-cardinality -> all continuous (omics scenario)
+    g = torch.Generator().manual_seed(0)
+    out = add_mixed_widening_features(x, 100, sparsity=0.05, noise_std=0.5,
+                                      include_original_prob=0.0, generator=g)
+    assert out.shape == (3, 50, 100)
+
+
+def test_mixed_widening_all_categorical_respects_max_cats():
+    x = torch.randint(0, 6, (3, 50, 12)).float()   # all low-cardinality -> all categorical
+    g = torch.Generator().manual_seed(0)
+    out = add_mixed_widening_features(x, 100, sparsity=0.1, noise_std=0.5, max_cats=10,
+                                      include_original_prob=0.0, generator=g)
+    assert out.shape == (3, 50, 100)
+    per_col_card = torch.tensor(
+        [out[b, :, j].unique().numel() for b in range(out.shape[0]) for j in range(out.shape[2])]
+    )
+    assert int(per_col_card.max()) <= 10
+
+
+def test_mixed_widening_mixed_input():
+    x = torch.empty(3, 50, 12)
+    x[:, :, :6] = torch.randint(0, 5, (3, 50, 6)).float()   # 6 categorical columns
+    x[:, :, 6:] = torch.randn(3, 50, 6)                     # 6 continuous columns
+    g = torch.Generator().manual_seed(0)
+    out = add_mixed_widening_features(x, 200, sparsity=0.05, noise_std=0.5,
+                                      include_original_prob=0.0, generator=g)
+    assert out.shape == (3, 50, 200)
+
+
+def test_mixed_widening_zero_features_returns_clone():
+    x = torch.randn(3, 50, 12)
+    out = add_mixed_widening_features(x, 0, sparsity=0.05, noise_std=0.5)
+    assert out.shape == (3, 50, 12)
+    assert torch.equal(out, x)
+
+
+def test_mixed_widening_does_not_mutate_input():
+    x = torch.randn(3, 50, 12)
+    before = x.clone()
+    add_mixed_widening_features(x, 30, sparsity=0.05, noise_std=0.5)
+    assert torch.equal(x, before)
+
+
+def test_mixed_widening_reproducible():
+    x = torch.randn(3, 50, 12)
+    g1 = torch.Generator().manual_seed(11)
+    g2 = torch.Generator().manual_seed(11)
+    a = add_mixed_widening_features(x, 40, sparsity=0.05, noise_std=0.5, generator=g1)
+    b = add_mixed_widening_features(x, 40, sparsity=0.05, noise_std=0.5, generator=g2)
+    assert torch.equal(a, b)
+
+
+def test_mixed_widening_rejects_non_3d():
+    with pytest.raises(ValueError):
+        add_mixed_widening_features(torch.randn(50, 12), 10, sparsity=0.05, noise_std=0.5)
