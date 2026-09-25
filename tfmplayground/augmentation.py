@@ -88,3 +88,65 @@ def add_widening_features(
         perm = torch.randperm(x_wide.shape[-1], generator=generator, device=x.device)
         x_wide = x_wide[..., perm]
     return x_wide
+
+def detect_categorical_mask(x: torch.Tensor, max_unique: int = 20) -> torch.Tensor:
+    """Boolean mask of categorical features (Algorithm 2 type detection, TabPFN-Wide).
+
+    A feature is considered categorical if it has at most ``max_unique`` distinct
+    observed (non-NaN) values, following the paper's rule (<= 20 distinct values);
+    every other feature is treated as continuous. Distinct values are counted per
+    feature over the SAMPLES axis, ignoring NaNs so that injected missingness never
+    inflates a feature's cardinality.
+
+    This is the WIDENING-time detection applied to the synthetic prior, and is
+    deliberately separate from the inference-time categorical detection used on real
+    data (which uses a different, smaller threshold calibrated for n ~ 150).
+
+    Args:
+        x: feature tensor of shape (num_samples, num_features).
+        max_unique: maximum number of distinct values for a feature to count as categorical.
+
+    Returns:
+        Boolean tensor of shape (num_features,), True where the feature is categorical.
+    """
+    if x.ndim != 2:
+        raise ValueError(f"x must be 2D (num_samples, num_features), got shape {tuple(x.shape)}.")
+
+    # Sort each column; torch places NaNs at the end. A distinct non-NaN value starts a
+    # new group when it differs from the value above and neither cell is NaN.
+    x_sorted, _ = torch.sort(x, dim=0)
+    nan_sorted = torch.isnan(x_sorted)
+    both_valid = (~nan_sorted[:-1]) & (~nan_sorted[1:])
+    new_value = both_valid & (x_sorted[:-1] != x_sorted[1:])
+    has_valid = (~nan_sorted).any(dim=0)
+    n_unique = new_value.sum(dim=0) + has_valid.long()
+    return n_unique <= max_unique
+
+
+def split_widening_budget(cat_mask: torch.Tensor, num_features_to_add: int) -> tuple[int, int]:
+    """Allocate the widening budget between continuous and categorical features.
+
+    Following the paper: with categorical ratio ``r_cat = num_categorical / num_total``,
+    allocate ``d_cat = floor(r_cat * num_features_to_add)`` categorical features and the
+    remaining ``d_cont = num_features_to_add - d_cat`` continuous features. When there are
+    no categorical features (r_cat = 0), the whole budget goes to continuous features (the
+    all-continuous omics scenario).
+
+    Args:
+        cat_mask: boolean tensor of shape (num_features,) from ``detect_categorical_mask``.
+        num_features_to_add: total number of new features to generate (d - m), >= 0.
+
+    Returns:
+        (num_continuous_to_add, num_categorical_to_add), summing to num_features_to_add.
+    """
+    if num_features_to_add < 0:
+        raise ValueError(f"num_features_to_add must be >= 0, got {num_features_to_add}.")
+    num_total = cat_mask.numel()
+    if num_total == 0:
+        raise ValueError("cat_mask must not be empty.")
+
+    num_categorical = int(cat_mask.sum().item())
+    r_cat = num_categorical / num_total
+    num_cat_to_add = int(r_cat * num_features_to_add)  # floor for non-negative values
+    num_cont_to_add = num_features_to_add - num_cat_to_add
+    return num_cont_to_add, num_cat_to_add
