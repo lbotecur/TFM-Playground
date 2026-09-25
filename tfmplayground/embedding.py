@@ -6,6 +6,19 @@ from sklearn.model_selection import KFold, StratifiedKFold
 from tfmplayground.interface import NanoTabPFNClassifier
 
 
+def _take_rows(data, idx):
+    """Row-select while preserving the container type.
+
+    Uses ``.iloc`` for pandas objects (which keeps each column's dtype) and plain indexing
+    otherwise. This matters because ``np.asarray`` on a mixed-type DataFrame collapses every
+    column to ``object``; the categorical OrdinalEncoder would then store object-dtype
+    categories and later raise on ``transform`` of a normally-typed input.
+    """
+    if hasattr(data, "iloc"):
+        return data.iloc[idx]
+    return np.asarray(data)[idx]
+
+
 def leave_one_fold_out_embeddings(
     estimator,
     X_train: np.ndarray,
@@ -27,9 +40,13 @@ def leave_one_fold_out_embeddings(
     weights), the same estimator is reused across folds instead of cloning. The estimator is
     refit on the full training set before returning, so it stays usable afterwards.
 
+    pandas inputs are kept as pandas throughout (rows selected with ``.iloc``) so the
+    estimator's dtype-based preprocessing sees proper column types; converting a mixed-type
+    DataFrame to a NumPy array would collapse it to ``object`` and break categorical encoding.
+
     Args:
         estimator: a NanoTabPFNClassifier or NanoTabPFNRegressor.
-        X_train, y_train: the training data.
+        X_train, y_train: the training data (NumPy arrays or pandas objects).
         n_folds: number of folds (>= 2).
         shuffle: whether to shuffle before splitting.
         random_state: seed used only when ``shuffle`` is True.
@@ -42,25 +59,22 @@ def leave_one_fold_out_embeddings(
     if n_folds < 2:
         raise ValueError("n_folds must be >= 2 for leave-one-fold-out extraction.")
 
-    X_train = np.asarray(X_train)
-    y_train = np.asarray(y_train)
-
     if stratified is None:
         stratified = isinstance(estimator, NanoTabPFNClassifier)
 
     rs = random_state if shuffle else None
     if stratified:
         splitter = StratifiedKFold(n_splits=n_folds, shuffle=shuffle, random_state=rs)
-        splits = splitter.split(X_train, y_train)
+        splits = splitter.split(np.zeros(len(y_train)), y_train)
     else:
         splitter = KFold(n_splits=n_folds, shuffle=shuffle, random_state=rs)
-        splits = splitter.split(X_train)
+        splits = splitter.split(np.zeros(len(y_train)))
 
     chunks: list[np.ndarray] = []
     val_indices: list[np.ndarray] = []
     for fold_train_idx, fold_val_idx in splits:
-        estimator.fit(X_train[fold_train_idx], y_train[fold_train_idx])
-        chunks.append(estimator.get_embeddings(X_train[fold_val_idx]))
+        estimator.fit(_take_rows(X_train, fold_train_idx), _take_rows(y_train, fold_train_idx))
+        chunks.append(estimator.get_embeddings(_take_rows(X_train, fold_val_idx)))
         val_indices.append(fold_val_idx)
 
     oof = np.concatenate(chunks, axis=0)
