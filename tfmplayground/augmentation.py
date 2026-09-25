@@ -281,3 +281,91 @@ def add_categorical_widening_features(
         new_col = x_cat[rows, donors[donor_per_row]]
         out[:, j] = reduce_cardinality(new_col, int(target_cards[j].item()), generator=generator)
     return out
+
+
+def add_mixed_widening_features(
+    x: torch.Tensor,
+    num_features_to_add: int,
+    sparsity: float,
+    noise_std: float,
+    max_cats: int = 20,
+    include_original_prob: float = 0.5,
+    max_unique_for_categorical: int = 20,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Mixed continuous + categorical feature widening, applied per dataset (TabPFN-Wide).
+
+    For each dataset in the batch: detect categorical vs continuous features, split the
+    widening budget by the categorical ratio, widen continuous features with Algorithm 1 and
+    categorical features with Algorithm 2, concatenate the new features, and -- once, shared
+    across the batch, with probability ``include_original_prob`` -- append the original
+    features and permute the column order. The per-batch (not per-dataset) append decision
+    keeps every dataset the same width so the batch can be stacked back together.
+
+    Applying widening independently per dataset follows the paper ("feature widening is
+    applied independently per dataset"). The continuous branch reuses ``add_widening_features``
+    with ``include_original_prob=0.0`` so the originals are appended only once, here.
+
+    Args:
+        x: feature tensor of shape (batch_size, num_samples, num_features).
+        num_features_to_add: total new features per dataset (d - m), >= 0.
+        sparsity: sparsity p shared by both algorithms; paper uses [0, 0.05].
+        noise_std: continuous noise scale sigma; paper uses [0, 1].
+        max_cats: maximum categorical cardinality Kmax for Algorithm 2.
+        include_original_prob: probability of appending originals and permuting (once, batch-wide).
+        max_unique_for_categorical: categorical detection threshold (paper: <= 20).
+        generator: optional torch.Generator for reproducibility.
+
+    Returns:
+        A new tensor of shape (batch_size, num_samples, width), where width is
+        num_features_to_add (plus num_features when the originals are appended). The input is
+        never modified.
+    """
+    if x.ndim != 3:
+        raise ValueError(f"x must be 3D (batch_size, num_samples, num_features), got {tuple(x.shape)}.")
+    if num_features_to_add < 0:
+        raise ValueError(f"num_features_to_add must be >= 0, got {num_features_to_add}.")
+    if not 0.0 <= sparsity <= 1.0:
+        raise ValueError(f"sparsity must be in [0, 1], got {sparsity}.")
+    if noise_std < 0:
+        raise ValueError(f"noise_std must be >= 0, got {noise_std}.")
+
+    if num_features_to_add == 0:
+        return x.clone()
+
+    # One batch-wide decision so every dataset ends with the same width (stackable).
+    include_original = (
+        torch.rand(1, generator=generator, device=x.device).item() < include_original_prob
+    )
+
+    widened = []
+    for b in range(x.shape[0]):
+        xb = x[b]  # (num_samples, num_features)
+        cat_mask = detect_categorical_mask(xb, max_unique=max_unique_for_categorical)
+        num_cont_to_add, num_cat_to_add = split_widening_budget(cat_mask, num_features_to_add)
+
+        blocks = []
+        if num_cont_to_add > 0:
+            x_cont = xb[:, ~cat_mask]
+            blocks.append(
+                add_widening_features(
+                    x_cont, num_cont_to_add, sparsity, noise_std,
+                    include_original_prob=0.0, generator=generator,
+                )
+            )
+        if num_cat_to_add > 0:
+            x_cat = xb[:, cat_mask]
+            blocks.append(
+                add_categorical_widening_features(
+                    x_cat, num_cat_to_add, sparsity, max_cats=max_cats, generator=generator,
+                )
+            )
+        new_features = torch.cat(blocks, dim=-1)  # (num_samples, num_features_to_add)
+
+        if include_original:
+            new_features = torch.cat([xb, new_features], dim=-1)
+            perm = torch.randperm(new_features.shape[-1], generator=generator, device=x.device)
+            new_features = new_features[:, perm]
+        widened.append(new_features)
+
+    return torch.stack(widened, dim=0)

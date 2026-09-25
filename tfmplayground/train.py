@@ -8,7 +8,7 @@ from pfns.bar_distribution import FullSupportBarDistribution
 from torch import nn
 from torch.utils.data import DataLoader
 
-from tfmplayground.augmentation import add_widening_features, inject_mcar_missingness
+from tfmplayground.augmentation import add_mixed_widening_features, inject_mcar_missingness
 from tfmplayground.callbacks import Callback
 from tfmplayground.models.nanotabpfn import NanoTabPFNModel
 from tfmplayground.normalization import compute_target_stats_torch, normalize_targets
@@ -19,6 +19,8 @@ from tfmplayground.utils import get_default_device
 class WideningConfig:
     """Config for TabPFN-Wide-style feature widening during training. add_features_max == 0
     disables it. Ranges follow the paper: sparsity p in [0, 0.05], noise sigma in [0, 1].
+    Widening is mixed (continuous via Algorithm 1, categorical via Algorithm 2); max_cats is
+    the maximum categorical cardinality Kmax used by the categorical branch.
     """
 
     add_features_max: int = 0
@@ -26,6 +28,7 @@ class WideningConfig:
     sparsity_max: float = 0.05
     noise_max: float = 1.0
     include_original_prob: float = 0.5
+    max_cats: int = 20
 
 def train(
     model: NanoTabPFNModel,
@@ -88,14 +91,22 @@ def train(
                 train_test_split_index = full_data["train_test_split_index"]
                 x = full_data["x"].to(device)
                 # Feature widening (HDLSS prior): per batch, sample how many features to add and
-                # the sparsity/noise, then generate them (Algorithm 1). No-op when disabled.
+                # the sparsity/noise, then generate them per dataset (Algorithm 1 for continuous
+                # features, Algorithm 2 for categorical). No-op when disabled.
                 if widening is not None and widening.add_features_max > 0:
                     num_add = int(
                         torch.randint(widening.add_features_min, widening.add_features_max + 1, (1,)).item()
                     )
                     sparsity = torch.rand(1).item() * widening.sparsity_max
                     noise = torch.rand(1).item() * widening.noise_max
-                    x = add_widening_features(x, num_add, sparsity, noise, widening.include_original_prob)
+                    x = add_mixed_widening_features(
+                        x,
+                        num_add,
+                        sparsity,
+                        noise,
+                        max_cats=widening.max_cats,
+                        include_original_prob=widening.include_original_prob,
+                    )
                 # Training-time MCAR augmentation: per batch, draw a rate ~ U(0, missing_rate_max)
                 # and set feature cells to NaN, so the model learns to use the missing indicator.
                 if missing_rate_max > 0:
