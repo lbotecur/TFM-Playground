@@ -23,9 +23,12 @@ def run_mlomics(
     n_features: tuple[int, ...] = (0,),
     device: str = "cuda",
     tabpfn_wide_root: str | Path | None = None,
+    amp_dtype=None,
 ) -> pd.DataFrame:
     """Evaluates every model on every dataset and feature count with the TabPFN-Wide protocol.
-    If tabpfn_wide_root is given, first checks that our test folds are identical to theirs."""
+    If tabpfn_wide_root is given, first checks that our test folds are identical to theirs.
+    amp_dtype (e.g. torch.bfloat16) runs our checkpoints in mixed precision; those rows are labelled
+    with the dtype (e.g. "path [bfloat16]") so that results of different precisions never mix."""
     output = Path(output)
     results = pd.read_csv(output) if output.exists() else pd.DataFrame(columns=COLUMNS)
     omic_name = "+".join(omics)
@@ -44,7 +47,9 @@ def run_mlomics(
             if published is not None:
                 same = mlomics.check_folds_match(published, dataset, X.shape[1], y)
                 print(f"{dataset} | {X.shape[1]} features | folds identical to TabPFN-Wide: {'yes' if same else 'NO'}", flush=True)
-            for name in models:
+            for model_name in models:
+                is_baseline = model_name in ("random_forest", "logreg")
+                name = model_name if is_baseline or amp_dtype is None else f"{model_name} [{str(amp_dtype).split('.')[-1]}]"
                 done = set(
                     results[
                         (results.dataset_name == dataset) & (results.omic == omic_name)
@@ -54,7 +59,8 @@ def run_mlomics(
                 for i, (train_idx, test_idx) in enumerate(folds):
                     if i in done:
                         continue
-                    proba = predict_proba(make_model(name, device), X[train_idx], y[train_idx], X[test_idx])
+                    model = make_model(model_name, device, None if is_baseline else amp_dtype)
+                    proba = predict_proba(model, X[train_idx], y[train_idx], X[test_idx])
                     row = {
                         "dataset_name": dataset, "omic": omic_name, "checkpoint": name, "n_features": X.shape[1],
                         "fold": i, "accuracy": accuracy(y[test_idx], proba), "roc_auc": roc_auc(y[test_idx], proba),

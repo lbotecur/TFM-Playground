@@ -12,7 +12,7 @@ from tfmplayground.augmentation import add_mixed_widening_features, inject_mcar_
 from tfmplayground.callbacks import Callback
 from tfmplayground.models.nanotabpfn import NanoTabPFNModel
 from tfmplayground.normalization import compute_target_stats_torch, normalize_targets
-from tfmplayground.utils import get_default_device
+from tfmplayground.utils import autocast, get_default_device
 
 
 @dataclass
@@ -151,9 +151,7 @@ def train(
 
                 # Mixed precision: matmuls/attention in amp_dtype, weights stay fp32. The loss is
                 # computed in fp32. bf16 has fp32's range, so no GradScaler is needed.
-                with torch.autocast(
-                    device_type=torch.device(device).type, dtype=amp_dtype, enabled=amp_dtype is not None
-                ):
+                with autocast(device, amp_dtype):
                     output = model(data, train_test_split_index=train_test_split_index)
                 output = output.float()
                 targets = targets[:, train_test_split_index:]
