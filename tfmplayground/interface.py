@@ -16,7 +16,7 @@ from tfmplayground.normalization import (
     denormalize_predictions,
     normalize_targets,
 )
-from tfmplayground.utils import get_default_device
+from tfmplayground.utils import autocast, get_default_device
 
 
 def _migrate_feature_encoder_weights(model_state: dict) -> dict:
@@ -184,6 +184,7 @@ class NanoTabPFNClassifier:
         infer_categorical: bool = True,
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
+        amp_dtype: torch.dtype | None = None,
     ):
         device = torch.device(get_default_device() if device is None else device)
         if model is None:
@@ -205,6 +206,9 @@ class NanoTabPFNClassifier:
         self.infer_categorical = infer_categorical
         self.max_unique_for_categorical = max_unique_for_categorical
         self.min_samples_for_categorical_inference = min_samples_for_categorical_inference
+        # Mixed precision for inference, as amp_dtype in train(): e.g. torch.bfloat16 runs matmuls and
+        # attention in bf16 (much faster on wide tables). None keeps fp32.
+        self.amp_dtype = amp_dtype
 
     def fit(self, 
             X_train: np.ndarray | pd.DataFrame, 
@@ -247,9 +251,11 @@ class NanoTabPFNClassifier:
         with torch.no_grad():
             x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)  # introduce batch size 1
             y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-            out = self.model(
-                (x, y), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks
-            ).squeeze(0)  # remove batch size 1
+            with autocast(self.device, self.amp_dtype):
+                out = self.model(
+                    (x, y), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks
+                )
+            out = out.float().squeeze(0)  # softmax in fp32; remove batch size 1
             # our pretrained classifier supports up to num_outputs classes, if the dataset has less we cut off the rest
             out = out[:, : self.num_classes]
             # apply softmax to get a probability distribution
@@ -285,7 +291,8 @@ class NanoTabPFNClassifier:
             with torch.no_grad():
                 xt = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
                 yt = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-                self.model((xt, yt), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks)
+                with autocast(self.device, self.amp_dtype):
+                    self.model((xt, yt), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks)
             # average over layers: stack to (num_layers, C) -> (C,); last entry is target->target
             per_layer = torch.stack([block.feature_attention for block in blocks], dim=0)
             attention_to_columns = per_layer.mean(dim=0)[:-1].to("cpu").numpy()  # (C-1,) transformed cols
@@ -314,8 +321,9 @@ class NanoTabPFNClassifier:
             with torch.no_grad():
                 xt = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
                 yt = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-                self.model((xt, yt), train_test_split_index=len(self.X_train))
-            embeddings = self.model.embeddings[0, len(self.X_train):, :].to("cpu").numpy()
+                with autocast(self.device, self.amp_dtype):
+                    self.model((xt, yt), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks)
+            embeddings = self.model.embeddings[0, len(self.X_train):, :].float().to("cpu").numpy()
         finally:
             self.model.save_embeddings = False
             self.model.embeddings = None
@@ -335,6 +343,7 @@ class NanoTabPFNRegressor:
         infer_categorical: bool = True,
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
+        amp_dtype: torch.dtype | None = None,
     ):
         device = torch.device(get_default_device() if device is None else device)
         if model is None:
@@ -370,6 +379,9 @@ class NanoTabPFNRegressor:
         self.infer_categorical = infer_categorical
         self.max_unique_for_categorical = max_unique_for_categorical
         self.min_samples_for_categorical_inference = min_samples_for_categorical_inference
+        # Mixed precision for inference, as amp_dtype in train(): e.g. torch.bfloat16 runs matmuls and
+        # attention in bf16 (much faster on wide tables). None keeps fp32.
+        self.amp_dtype = amp_dtype
 
     def fit(self, 
             X_train:np.ndarray | pd.DataFrame, 
@@ -404,9 +416,11 @@ class NanoTabPFNRegressor:
             X_tensor = torch.tensor(X, dtype=torch.float32, device=self.device).unsqueeze(0)
             y_tensor = torch.tensor(y, dtype=torch.float32, device=self.device).unsqueeze(0)
 
-            logits = self.model(
-                (X_tensor, y_tensor), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks
-            ).squeeze(0)
+            with autocast(self.device, self.amp_dtype):
+                logits = self.model(
+                    (X_tensor, y_tensor), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks
+                )
+            logits = logits.float().squeeze(0)  # distribution in fp32
             preds_n = self.dist.mean(logits)
             preds = denormalize_predictions(preds_n, self.y_train_mean, self.y_train_std)
 
@@ -426,8 +440,9 @@ class NanoTabPFNRegressor:
             with torch.no_grad():
                 xt = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
                 yt = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-                self.model((xt, yt), train_test_split_index=len(self.X_train))
-            embeddings = self.model.embeddings[0, len(self.X_train):, :].to("cpu").numpy()
+                with autocast(self.device, self.amp_dtype):
+                    self.model((xt, yt), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks)
+            embeddings = self.model.embeddings[0, len(self.X_train):, :].float().to("cpu").numpy()
         finally:
             self.model.save_embeddings = False
             self.model.embeddings = None

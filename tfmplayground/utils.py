@@ -12,6 +12,12 @@ def set_randomness_seed(seed):
     torch.manual_seed(seed)
 
 
+def autocast(device, amp_dtype: torch.dtype | None):
+    """Mixed-precision context used both in training and in inference: matmuls and attention run in
+    amp_dtype (e.g. torch.bfloat16) while weights stay in fp32. amp_dtype=None disables it (fp32)."""
+    return torch.autocast(device_type=torch.device(device).type, dtype=amp_dtype, enabled=amp_dtype is not None)
+
+
 def get_default_device():
     device = "cpu"
     if torch.backends.mps.is_available():

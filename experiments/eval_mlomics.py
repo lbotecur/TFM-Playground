@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 import pandas as pd
+import torch
 
 from tfmplayground.benchmarks import mlomics
 from tfmplayground.benchmarks.runner import compare, run_mlomics
@@ -25,6 +26,7 @@ parser.add_argument("--datasets", nargs="+", default=list(mlomics.DATASETS))
 parser.add_argument("--omics", nargs="+", default=["mrna"], help="mrna, cnv, methylation, mirna")
 parser.add_argument("--n-features", nargs="+", type=int, default=[0], help="0 = all features")
 parser.add_argument("--gpu", type=int, default=0)
+parser.add_argument("--bf16", action="store_true", help="run our checkpoints in bf16 (rows labelled [bfloat16])")
 parser.add_argument("--output", default="workdir/eval/mlomics.csv")
 parser.add_argument("--mlomics-root", default=str(REPO.parent / "Cancer-Multi-Omics-Benchmark"))
 parser.add_argument("--tabpfn-wide-root", default=str(REPO.parent / "TabPFN-Wide"))
@@ -40,6 +42,7 @@ results = run_mlomics(
     n_features=tuple(args.n_features),
     device=f"cuda:{args.gpu}",
     tabpfn_wide_root=args.tabpfn_wide_root if Path(args.tabpfn_wide_root).exists() else None,
+    amp_dtype=torch.bfloat16 if args.bf16 else None,
 )
 if Path(args.tabpfn_wide_root).exists() and tuple(args.omics) == ("mrna",):
     published = {m: mlomics.published_results(args.tabpfn_wide_root, m) for m in PUBLISHED}

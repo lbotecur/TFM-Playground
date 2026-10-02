@@ -10,17 +10,17 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 
-def make_model(name: str, device: str = "cuda"):
+def make_model(name: str, device: str = "cuda", amp_dtype=None):
     """'random_forest' and 'logreg' are baselines; any other name is taken as the path of one of our
     checkpoints and evaluated with NanoTabPFNClassifier, without ensembling (one forward pass), as
-    TabPFN-Wide evaluates its own model."""
+    TabPFN-Wide evaluates its own model. amp_dtype (e.g. torch.bfloat16) only applies to checkpoints."""
     if name == "random_forest":  # as TabPFN-Wide: default hyperparameters, NaN imputed with the mode
         return make_pipeline(SimpleImputer(strategy="most_frequent"), RandomForestClassifier(n_jobs=-1))
     if name == "logreg":
         return make_pipeline(SimpleImputer(strategy="most_frequent"), StandardScaler(), LogisticRegression(max_iter=5000))
     from tfmplayground.interface import NanoTabPFNClassifier  # needs torch, only imported here
 
-    return NanoTabPFNClassifier(model=name, device=device)
+    return NanoTabPFNClassifier(model=name, device=device, amp_dtype=amp_dtype)
 
 
 def predict_proba(model, X_train: np.ndarray, y_train: np.ndarray, X_test: np.ndarray) -> np.ndarray:
