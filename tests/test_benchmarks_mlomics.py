@@ -94,3 +94,46 @@ def test_external_model_names():
     assert not is_checkpoint("tabpfn-wide-5k") and not is_checkpoint("tabpfn-v2-gn2p4bpt:n8")
     assert not is_checkpoint("random_forest") and not is_checkpoint("logreg")
     assert is_checkpoint("workdir/graph_scm_base_w5000/epoch_100.pth")
+
+
+def test_run_benchmark_baselines_resume_and_compare(tmp_path):
+    from tfmplayground.benchmarks.analysis import mean_table, paired
+    from tfmplayground.benchmarks.runner import run_benchmark
+
+    _fake_mlomics(tmp_path / mlomics.FOLDER)
+    out = tmp_path / "results.csv"
+    models = ["random_forest", "logreg_en"]
+    res = run_benchmark(["mlomics/BRCA/mrna"], models, out, tmp_path, n_features=(0, 10), device="cpu")
+    assert len(res) == 2 * 2 * 5  # models x feature counts x folds
+    assert set(res.n_features) == {39, 10} and res.roc_auc.between(0, 1).all() and (res.seconds >= 0).all()
+    again = run_benchmark(["mlomics/BRCA/mrna"], models, out, tmp_path, n_features=(0, 10), device="cpu")
+    assert len(again) == len(res)  # nothing recomputed
+
+    assert list(mean_table(again).columns) == sorted(models)
+    p = paired(again, "logreg_en", "random_forest")
+    assert p["folds"] == 10 and p["wins"] + p["ties"] + p["losses"] == 10
+
+
+def test_paired_counts_and_sign():
+    import pandas as pd
+
+    from tfmplayground.benchmarks.analysis import paired
+
+    base = {"benchmark": "b", "dataset": "d", "n_features": 5}
+    rows = [{**base, "fold": f, "model": "a", "roc_auc": 0.9} for f in range(4)]
+    rows += [{**base, "fold": f, "model": "ref", "roc_auc": v} for f, v in enumerate([0.8, 0.85, 0.9, 0.95])]
+    p = paired(pd.DataFrame(rows), "a", "ref")
+    assert (p["folds"], p["wins"], p["ties"], p["losses"]) == (4, 2, 1, 1)
+    assert p["mean_diff"] == pytest.approx(0.025)
+
+
+def test_xgboost_and_categorical_columns():
+    pytest.importorskip("xgboost")
+    from tfmplayground.benchmarks.models import make_model, predict_proba
+
+    rng = np.random.default_rng(0)
+    X = np.column_stack([rng.integers(0, 3, 80), rng.normal(size=(80, 4))]).astype(np.float32)
+    y = (X[:, 0] == 1).astype(int)
+    for name in ("xgboost", "logreg_en"):
+        proba = predict_proba(make_model(name, "cpu", categorical=[0]), X[:60], y[:60], X[60:])
+        assert proba.shape == (20, 2) and roc_auc(y[60:], proba) > 0.9

@@ -3,8 +3,10 @@ evaluation can be resumed and every fold can later be compared with published pe
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from tfmplayground.benchmarks import mlomics
@@ -87,3 +89,59 @@ def compare(ours: pd.DataFrame, published: dict[str, pd.DataFrame], metric: str 
     allres = allres[[k in keys for k in map(tuple, allres[["dataset_name", "n_features"]].values)]]
     stats = allres.groupby(["dataset_name", "n_features", "checkpoint"])[metric].agg(["mean", "std", "count"])
     return stats.reset_index()
+
+
+BENCHMARKS = {"mlomics": mlomics}  # each module: load_task(name, data_root) -> X, y, categorical; folds(y)
+RESULT_COLUMNS = ["benchmark", "dataset", "n_features", "model", "fold", "accuracy", "roc_auc", "seconds"]
+
+
+def run_benchmark(
+    datasets: list[str],
+    models: list[str],
+    output: str | Path,
+    data_root: str | Path,
+    n_features: tuple[int, ...] = (0,),
+    device: str = "cuda",
+    amp_dtype=None,
+) -> pd.DataFrame:
+    """Evaluates every model on every dataset ("<benchmark>/<name>", e.g. "mlomics/BRCA/mrna+cnv") and
+    feature count (0 = all; otherwise feature agglomeration, only for all-numeric data), with the folds
+    of each benchmark. Appends one row per fold to the CSV and skips folds already there, so it can be
+    resumed. Every model is told which columns are categorical. Our checkpoints run in amp_dtype if
+    given, and are then labelled with it (e.g. "path [bfloat16]")."""
+    output = Path(output)
+    results = pd.read_csv(output) if output.exists() else pd.DataFrame(columns=RESULT_COLUMNS)
+    for spec in datasets:
+        benchmark, _, name = spec.partition("/")
+        module = BENCHMARKS[benchmark]
+        X_full, y, categorical = module.load_task(name, data_root)
+        for n in n_features:
+            if n > X_full.shape[1]:
+                print(f"{spec}: skipping {n} features, only {X_full.shape[1]} available", flush=True)
+                continue
+            if n and categorical:
+                raise ValueError(f"{spec}: feature agglomeration needs all-numeric data")
+            X = mlomics.reduce_features(X_full, n) if n else np.asarray(X_full, dtype=np.float32)
+            folds = module.folds(y)
+            for model_name in models:
+                ours = is_checkpoint(model_name)
+                label = model_name
+                if ours and amp_dtype is not None:
+                    label = f"{model_name} [{str(amp_dtype).split('.')[-1]}]"
+                done = set(results[(results.benchmark == benchmark) & (results.dataset == name)
+                                   & (results.n_features == X.shape[1]) & (results.model == label)].fold)
+                for i, (train_idx, test_idx) in enumerate(folds):
+                    if i in done:
+                        continue
+                    start = time.time()
+                    model = make_model(model_name, device, amp_dtype if ours else None, categorical=categorical)
+                    proba = predict_proba(model, X[train_idx], y[train_idx], X[test_idx])
+                    row = {"benchmark": benchmark, "dataset": name, "n_features": X.shape[1], "model": label,
+                           "fold": i, "accuracy": accuracy(y[test_idx], proba), "roc_auc": roc_auc(y[test_idx], proba),
+                           "seconds": round(time.time() - start, 1)}
+                    results = pd.concat([results, pd.DataFrame([row])], ignore_index=True)
+                    print(f"{spec} | {X.shape[1]} | {label} | fold {i} | AUROC {row['roc_auc']:.3f} | "
+                          f"{row['seconds']:.0f}s", flush=True)
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    results.to_csv(output, index=False)  # after every fold: nothing is lost if it stops
+    return results

@@ -43,6 +43,17 @@ def load(dataset: str, root: str | Path, omics: tuple[str, ...] = ("mrna",)) -> 
     return X, LabelEncoder().fit_transform(labels)
 
 
+FOLDER = "Cancer-Multi-Omics-Benchmark"  # expected inside the data root
+
+
+def load_task(name: str, data_root: str | Path) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    """'BRCA/mrna' or 'BRCA/mrna+cnv+methylation+mirna' (omics concatenated in that order) -> features,
+    labels and categorical columns (none: copy-number levels are ordinal, so they stay numeric)."""
+    dataset, _, omics = name.partition("/")
+    X, y = load(dataset, Path(data_root) / FOLDER, tuple((omics or "mrna").split("+")))
+    return X, y, []
+
+
 def reduce_features(X: pd.DataFrame, n_features: int) -> np.ndarray:
     """Feature agglomeration to n_features (0 or more than available: unchanged), as TabPFN-Wide.
     Like them, it is fitted on all samples: it does not use the labels, but it does see the test rows."""
