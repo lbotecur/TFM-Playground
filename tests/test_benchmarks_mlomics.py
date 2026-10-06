@@ -137,3 +137,21 @@ def test_xgboost_and_categorical_columns():
     for name in ("xgboost", "logreg_en"):
         proba = predict_proba(make_model(name, "cpu", categorical=[0]), X[:60], y[:60], X[60:])
         assert proba.shape == (20, 2) and roc_auc(y[60:], proba) > 0.9
+
+
+def test_low_memory_label_only_for_our_checkpoints(tmp_path, monkeypatch):
+    from tfmplayground.benchmarks import runner
+
+    _fake_mlomics(tmp_path / mlomics.FOLDER)
+    seen = []
+    real = runner.make_model
+
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory=False):
+        seen.append((name, low_memory))
+        return real("random_forest", "cpu")
+
+    monkeypatch.setattr(runner, "make_model", spy)
+    res = runner.run_benchmark(["mlomics/BRCA/mrna"], ["ckpt.pth", "random_forest"], tmp_path / "r.csv", tmp_path,
+                               device="cpu", low_memory=True)
+    assert set(res.model) == {"ckpt.pth [low-memory]", "random_forest"}
+    assert ("ckpt.pth", True) in seen and ("random_forest", False) in seen

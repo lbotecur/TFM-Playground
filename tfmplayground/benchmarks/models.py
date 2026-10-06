@@ -50,12 +50,14 @@ def _linear_inputs(categorical):
     return ColumnTransformer([("cat", onehot, list(categorical))], remainder=numeric)
 
 
-def make_model(name: str, device: str = "cuda", amp_dtype=None, categorical: list[int] | None = None):
+def make_model(name: str, device: str = "cuda", amp_dtype=None, categorical: list[int] | None = None,
+               low_memory: bool = False):
     """Baselines (BASELINES), other foundation models (EXTERNAL) or, for any other name, the path of one
     of our checkpoints, evaluated with NanoTabPFNClassifier without ensembling (one forward pass), as
     TabPFN-Wide evaluates its own model. amp_dtype (e.g. torch.bfloat16) only applies to our checkpoints.
     categorical: indices of the categorical columns ([] = all numeric). None keeps each model's own
-    automatic detection (what the first MLOmics evaluations used)."""
+    automatic detection (what the first MLOmics evaluations used). low_memory only applies to our
+    checkpoints (see NanoTabPFNClassifier): for tables of tens of thousands of features."""
     if name == "random_forest":  # as TabPFN-Wide: default hyperparameters, NaN imputed with the mode
         return make_pipeline(SimpleImputer(strategy="most_frequent"), RandomForestClassifier(n_jobs=-1))
     if name == "logreg":
@@ -91,10 +93,10 @@ def make_model(name: str, device: str = "cuda", amp_dtype=None, categorical: lis
     from tfmplayground.interface import NanoTabPFNClassifier  # needs torch, only imported here
 
     if categorical is None:
-        return NanoTabPFNClassifier(model=name, device=device, amp_dtype=amp_dtype)
+        return NanoTabPFNClassifier(model=name, device=device, amp_dtype=amp_dtype, low_memory=low_memory)
     # Declared types only: without this, numeric columns with few distinct values (e.g. copy-number
     # levels, or genes with many zeros) would be inferred categorical.
-    return NanoTabPFNClassifier(model=name, device=device, amp_dtype=amp_dtype,
+    return NanoTabPFNClassifier(model=name, device=device, amp_dtype=amp_dtype, low_memory=low_memory,
                                 categorical_features=list(categorical), infer_categorical=False)
 
 

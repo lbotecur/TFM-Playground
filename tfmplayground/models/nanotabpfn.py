@@ -116,6 +116,7 @@ class NanoTabPFNModel(nn.Module):
         # concatenates the feature embeddings with the target embeddings
         # to give us the full table of embeddings (B,R,C,E))
         src = torch.cat([x_src, y_src], 2)
+        del x_src, y_src  # do not keep a second full-size copy of the table alive
         # repeatedly applies the transformer block on (B,R,C,E)
         for block in self.transformer_blocks:
             if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
@@ -281,6 +282,10 @@ class TransformerEncoderLayer(nn.Module):
         # target column's attention to every feature (averaged over samples and heads) in
         # feature_attention. Off by default, so the normal forward path is unchanged.
         self.save_feature_attention = False
+        # Inference only (ignored while gradients are on): LayerNorms applied inside the memory chunks and
+        # activations kept in the dtype of the block input (bf16 under autocast), instead of full-size fp32
+        # LayerNorm outputs. Needed for tables with tens of thousands of features; off by default.
+        self.low_memory = False
         self.feature_attention: torch.Tensor | None = None
 
     @staticmethod
@@ -315,6 +320,12 @@ class TransformerEncoderLayer(nn.Module):
             (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size)
         """
         batch_size, rows_size, col_size, embedding_size = src.shape
+        low_memory = self.low_memory and not torch.is_grad_enabled()
+
+        def norm_in_chunk(norm, out, x):
+            # low_memory: normalize inside the chunk and keep the input dtype; otherwise unchanged
+            return norm(out).to(x.dtype) if low_memory else out
+
         # attention between features
         src = src.reshape(batch_size * rows_size, col_size, embedding_size)
 
@@ -331,14 +342,15 @@ class TransformerEncoderLayer(nn.Module):
             if self.save_feature_attention:
                 captured[0] += self.target_attention(self.self_attention_between_features, x).float().sum(dim=0)
                 captured[1] += x.shape[0]
-            return attn_output + x
+            return norm_in_chunk(self.norm1, attn_output + x, x)
 
         src = feature_attention(src)
         if self.save_feature_attention:
             # target column as query attending to every column, averaged over rows and heads -> (C,)
             self.feature_attention = (captured[0] / captured[1]).detach()
         src = src.reshape(batch_size, rows_size, col_size, embedding_size)
-        src = self.norm1(src)
+        if not low_memory:
+            src = self.norm1(src)
         # attention between datapoints
         src = src.transpose(1, 2)
         src = src.reshape(batch_size * col_size, rows_size, embedding_size)
@@ -360,22 +372,24 @@ class TransformerEncoderLayer(nn.Module):
                 x[:, :train_test_split_index],
                 need_weights=False,
             )[0]
-            return torch.cat([x_left, x_right], dim=1) + x
+            return norm_in_chunk(self.norm2, torch.cat([x_left, x_right], dim=1) + x, x)
 
         src = datapoint_attention(src)
         src = src.reshape(batch_size, col_size, rows_size, embedding_size)
         src = src.transpose(2, 1)
-        src = self.norm2(src)
+        if not low_memory:
+            src = self.norm2(src)
         # MLP after attention
         src = src.reshape(-1, embedding_size)
 
         @memory_chunking(num_mem_chunks)
         def mlp(x):
-            return self.linear2(F.gelu(self.linear1(x))) + x
+            return norm_in_chunk(self.norm3, self.linear2(F.gelu(self.linear1(x))) + x, x)
 
         src = mlp(src)
         src = src.reshape(batch_size, rows_size, col_size, embedding_size)
-        src = self.norm3(src)
+        if not low_memory:
+            src = self.norm3(src)
         return src
 
 

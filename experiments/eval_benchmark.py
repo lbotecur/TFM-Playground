@@ -26,6 +26,8 @@ parser.add_argument("--models", nargs="+", required=True)
 parser.add_argument("--n-features", nargs="+", type=int, default=[0], help="0 = all features")
 parser.add_argument("--gpu", type=int, default=0)
 parser.add_argument("--bf16", action="store_true", help="run our checkpoints in bf16 (labelled [bfloat16])")
+parser.add_argument("--low-memory", action="store_true",
+                    help="our checkpoints: low-memory inference for very wide tables (labelled [low-memory])")
 parser.add_argument("--output", default="workdir/eval/benchmarks.csv")
 parser.add_argument("--data-root", default=str(REPO.parent), help="folder that contains each benchmark's data")
 args = parser.parse_args()
@@ -39,4 +41,5 @@ run_benchmark(
     n_features=tuple(args.n_features),
     device=f"cuda:{args.gpu}",
     amp_dtype=torch.bfloat16 if args.bf16 else None,
+    low_memory=args.low_memory,
 )
