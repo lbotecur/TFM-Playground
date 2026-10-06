@@ -18,10 +18,13 @@ def mean_table(results: pd.DataFrame, metric: str = "roc_auc") -> pd.DataFrame:
 def paired(results: pd.DataFrame, model: str, reference: str, metric: str = "roc_auc") -> dict:
     """model against reference on the folds both have: number of folds, wins / ties / losses of model,
     mean difference and two-sided Wilcoxon p-value (folds of one dataset share samples, so they are not
-    independent: take the p-value as indicative)."""
+    independent: take the p-value as indicative). Folds where either metric is NaN are left out (e.g. AUROC
+    of a test fold that lacks a class, as COAD fold 0, also NaN in TabPFN-Wide's published results)."""
     a = results[results.model == model].set_index(KEYS)[metric]
     b = results[results.model == reference].set_index(KEYS)[metric]
     a, b = a.align(b, join="inner")
+    both = a.notna() & b.notna()
+    a, b = a[both], b[both]
     diff = (a - b).to_numpy()
     nonzero = diff[diff != 0]
     return {
