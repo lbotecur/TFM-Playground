@@ -157,3 +157,16 @@ def test_low_memory_label_only_for_our_checkpoints(tmp_path, monkeypatch):
                                device="cpu", low_memory=True)
     assert set(res.model) == {"ckpt.pth [low-memory]", "random_forest"}
     assert ("ckpt.pth", True) in seen and ("random_forest", False) in seen
+
+
+def test_paired_leaves_out_nan_folds():
+    import pandas as pd
+
+    from tfmplayground.benchmarks.analysis import paired
+
+    base = {"benchmark": "b", "dataset": "d", "n_features": 5}
+    rows = [{**base, "fold": f, "model": "a", "roc_auc": v} for f, v in enumerate([float("nan"), 0.9, 0.9])]
+    rows += [{**base, "fold": f, "model": "ref", "roc_auc": v} for f, v in enumerate([float("nan"), 0.8, 0.95])]
+    p = paired(pd.DataFrame(rows), "a", "ref")
+    assert (p["folds"], p["wins"], p["losses"]) == (2, 1, 1)
+    assert p["mean_diff"] == pytest.approx(0.025)
