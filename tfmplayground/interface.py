@@ -185,6 +185,7 @@ class NanoTabPFNClassifier:
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
         amp_dtype: torch.dtype | None = None,
+        low_memory: bool = False,
     ):
         device = torch.device(get_default_device() if device is None else device)
         if model is None:
@@ -209,6 +210,10 @@ class NanoTabPFNClassifier:
         # Mixed precision for inference, as amp_dtype in train(): e.g. torch.bfloat16 runs matmuls and
         # attention in bf16 (much faster on wide tables). None keeps fp32.
         self.amp_dtype = amp_dtype
+        # Inference on very wide tables (tens of thousands of features): see TransformerEncoderLayer.low_memory.
+        self.low_memory = low_memory
+        for block in getattr(self.model, "transformer_blocks", []):
+            block.low_memory = low_memory
 
     def fit(self, 
             X_train: np.ndarray | pd.DataFrame, 
@@ -344,6 +349,7 @@ class NanoTabPFNRegressor:
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
         amp_dtype: torch.dtype | None = None,
+        low_memory: bool = False,
     ):
         device = torch.device(get_default_device() if device is None else device)
         if model is None:
@@ -382,6 +388,10 @@ class NanoTabPFNRegressor:
         # Mixed precision for inference, as amp_dtype in train(): e.g. torch.bfloat16 runs matmuls and
         # attention in bf16 (much faster on wide tables). None keeps fp32.
         self.amp_dtype = amp_dtype
+        # Inference on very wide tables (tens of thousands of features): see TransformerEncoderLayer.low_memory.
+        self.low_memory = low_memory
+        for block in getattr(self.model, "transformer_blocks", []):
+            block.low_memory = low_memory
 
     def fit(self, 
             X_train:np.ndarray | pd.DataFrame, 
