@@ -17,15 +17,21 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 BASELINES = ("random_forest", "logreg", "logreg_en", "xgboost")
 # Foundation models from other packages, by name. A suffix ":n<k>" sets the number of ensemble members
-# (default 1, a single forward pass like our models and like TabPFN-Wide evaluates its own model).
+# (default 1, a single forward pass like our models and like TabPFN-Wide evaluates its own model);
+# ":auto" uses the package default. TabPFN-3.5 sees at most 768 features per ensemble member (TabPFN v2,
+# 500), so with one member it only sees a random subset of a wide table; "auto" adds members (8 to 32)
+# until every feature is seen by at least one, up to 32 x 768 features.
 # They need their own packages (tabpfnwide, which pins tabpfn 9.0.0, which includes TabPFN-3.5).
 EXTERNAL = ("tabpfn-wide-5k", "tabpfn-v2-gn2p4bpt", "tabpfn-3.5")
 
 
-def parse_external(name: str) -> tuple[str, int]:
-    """'tabpfn-3.5:n8' -> ('tabpfn-3.5', 8); 'tabpfn-3.5' -> ('tabpfn-3.5', 1)."""
-    base, _, n = name.partition(":n")
-    return base, int(n) if n else 1
+def parse_external(name: str) -> tuple[str, int | str]:
+    """'tabpfn-3.5:n8' -> ('tabpfn-3.5', 8); 'tabpfn-3.5:auto' -> ('tabpfn-3.5', 'auto');
+    'tabpfn-3.5' -> ('tabpfn-3.5', 1)."""
+    base, _, suffix = name.partition(":")
+    if not suffix:
+        return base, 1
+    return base, "auto" if suffix == "auto" else int(suffix.removeprefix("n"))
 
 
 def is_checkpoint(name: str) -> bool:
