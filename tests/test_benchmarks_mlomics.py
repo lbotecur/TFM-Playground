@@ -84,3 +84,13 @@ def test_run_mlomics_with_random_forest_resumes(tmp_path):
     table = compare(res, published)
     assert set(table.checkpoint) == {"random_forest", "[TabPFN-Wide] rf"}
     assert (table["count"] == 5).all()
+
+
+def test_external_model_names():
+    from tfmplayground.benchmarks.models import is_checkpoint, parse_external
+
+    assert parse_external("tabpfn-3.5") == ("tabpfn-3.5", 1)
+    assert parse_external("tabpfn-3.5:n8") == ("tabpfn-3.5", 8)
+    assert not is_checkpoint("tabpfn-wide-5k") and not is_checkpoint("tabpfn-v2-gn2p4bpt:n8")
+    assert not is_checkpoint("random_forest") and not is_checkpoint("logreg")
+    assert is_checkpoint("workdir/graph_scm_base_w5000/epoch_100.pth")

@@ -5,6 +5,8 @@ the per-fold results TabPFN-Wide published.
 Example, from the repo root:
     python experiments/eval_mlomics.py --gpu 5 --models random_forest workdir/graph_scm_base/epoch_40.pth
 Use epoch snapshots rather than latest_checkpoint.pth: the name is what identifies the model in the CSV.
+Other foundation models (they need the tabpfnwide package, which installs tabpfn 9.0.0):
+    python experiments/eval_mlomics.py --gpu 5 --models tabpfn-wide-5k tabpfn-v2-gn2p4bpt tabpfn-3.5 tabpfn-3.5:n8
 """
 
 import argparse
@@ -21,7 +23,9 @@ REPO = Path(__file__).resolve().parents[1]
 PUBLISHED = ("wide-v2-5k", "v2", "tabicl", "random_forest", "xgboost", "realmlp")
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--models", nargs="+", required=True, help="random_forest, logreg or checkpoint paths")
+parser.add_argument("--models", nargs="+", required=True,
+                    help="random_forest, logreg, checkpoint paths, or tabpfn-wide-5k, tabpfn-v2-gn2p4bpt, tabpfn-3.5 "
+                         "(optional :n<k> = k ensemble members, default 1)")
 parser.add_argument("--datasets", nargs="+", default=list(mlomics.DATASETS))
 parser.add_argument("--omics", nargs="+", default=["mrna"], help="mrna, cnv, methylation, mirna")
 parser.add_argument("--n-features", nargs="+", type=int, default=[0], help="0 = all features")
