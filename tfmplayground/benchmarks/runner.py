@@ -9,7 +9,7 @@ import pandas as pd
 
 from tfmplayground.benchmarks import mlomics
 from tfmplayground.benchmarks.metrics import accuracy, roc_auc
-from tfmplayground.benchmarks.models import make_model, predict_proba
+from tfmplayground.benchmarks.models import is_checkpoint, make_model, predict_proba
 
 COLUMNS = ["dataset_name", "omic", "checkpoint", "n_features", "fold", "accuracy", "roc_auc"]
 
@@ -48,8 +48,10 @@ def run_mlomics(
                 same = mlomics.check_folds_match(published, dataset, X.shape[1], y)
                 print(f"{dataset} | {X.shape[1]} features | folds identical to TabPFN-Wide: {'yes' if same else 'NO'}", flush=True)
             for model_name in models:
-                is_baseline = model_name in ("random_forest", "logreg")
-                name = model_name if is_baseline or amp_dtype is None else f"{model_name} [{str(amp_dtype).split('.')[-1]}]"
+                ours = is_checkpoint(model_name)  # amp_dtype only applies to our checkpoints
+                name = model_name
+                if ours and amp_dtype is not None:
+                    name = f"{model_name} [{str(amp_dtype).split('.')[-1]}]"
                 done = set(
                     results[
                         (results.dataset_name == dataset) & (results.omic == omic_name)
@@ -59,7 +61,7 @@ def run_mlomics(
                 for i, (train_idx, test_idx) in enumerate(folds):
                     if i in done:
                         continue
-                    model = make_model(model_name, device, None if is_baseline else amp_dtype)
+                    model = make_model(model_name, device, amp_dtype if ours else None)
                     proba = predict_proba(model, X[train_idx], y[train_idx], X[test_idx])
                     row = {
                         "dataset_name": dataset, "omic": omic_name, "checkpoint": name, "n_features": X.shape[1],
