@@ -354,11 +354,15 @@ def _widen(rng, config, layers, z_base, relevance, n_rows):
     return np.column_stack(blocks), np.concatenate(new_layers), np.concatenate(new_relevance)
 
 
-def sample_dataset(rng: np.random.Generator, config: OmicsPriorConfig | None = None) -> OmicsDataset:
-    """Samples one synthetic multi-omics classification dataset with its ground truth."""
+def sample_dataset(
+    rng: np.random.Generator, config: OmicsPriorConfig | None = None, n_rows: int | None = None
+) -> OmicsDataset:
+    """Samples one synthetic multi-omics classification dataset with its ground truth. n_rows fixes
+    the number of rows (e.g. to batch several datasets together); None samples it from the config."""
     config = config or OmicsPriorConfig()
+    fixed_rows = n_rows
     for _ in range(100):
-        n_rows = int(_loguniform(rng, config.min_rows, config.max_rows))
+        n_rows = fixed_rows or int(_loguniform(rng, config.min_rows, config.max_rows))
         layers, adj, y_node, n_latents = _sample_graph(rng, config)
         observed, z_base, y, num_classes = _generate_values(rng, config, layers, adj, y_node, n_latents, n_rows)
         if np.bincount(y, minlength=num_classes).min() < 2:  # every class needs a few samples

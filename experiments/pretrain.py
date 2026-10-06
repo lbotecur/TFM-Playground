@@ -7,6 +7,9 @@ Ejemplos, desde la raíz del repo:
     # run nuevo partiendo de los pesos de otro (continued pretraining):
     nohup python -u experiments/pretrain.py --gpu 6 --run-name mlp_scm_w8k --add-features-max 8000 \\
         --init-from workdir/mlp_scm/latest_checkpoint.pth > workdir/mlp_scm_w8k.log 2>&1 &
+    # prior ómico (ya ensancha él: --max-features es su ancho total máximo y train() no ensancha):
+    nohup python -u experiments/pretrain.py --gpu 6 --run-name omics --prior-type omics --max-features 5000 \\
+        > workdir/omics.log 2>&1 &
 """
 
 import os
@@ -24,12 +27,14 @@ from tfmplayground.callbacks import ConsoleLoggerCallback
 from tfmplayground.external_priors import TabICLPriorDataLoader
 from tfmplayground.interface import _migrate_state_dict
 from tfmplayground.models.nanotabpfn import NanoTabPFNModel
+from tfmplayground.priors.omics import OmicsPriorConfig
+from tfmplayground.priors.omics_loader import OmicsPriorDataLoader
 from tfmplayground.train import WideningConfig, train
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--run-name", required=True)
 parser.add_argument("--gpu", type=int, default=0)
-parser.add_argument("--prior-type", default="mlp_scm")  # mlp_scm, mix_scm, tree_scm, graph_scm
+parser.add_argument("--prior-type", default="mlp_scm")  # mlp_scm, mix_scm, tree_scm, graph_scm, omics
 parser.add_argument("--min-features", type=int, default=50)
 parser.add_argument("--max-features", type=int, default=350)
 parser.add_argument("--min-rows", type=int, default=40)
@@ -44,6 +49,8 @@ parser.add_argument("--missing-rate-max", type=float, default=0.1)
 parser.add_argument("--resume", action="store_true")  # continúa este run desde su latest_checkpoint.pth
 parser.add_argument("--init-from", default=None)  # pesos iniciales de otro checkpoint (continued pretraining)
 args = parser.parse_args()
+if args.prior_type == "omics":
+    args.add_features_max = 0  # el prior ómico ya ensancha; train() no vuelve a ensanchar
 
 os.chdir(Path(__file__).resolve().parents[1])  # workdir/ siempre en la raíz del repo
 device = torch.device(f"cuda:{args.gpu}")
@@ -55,20 +62,36 @@ run_dir.mkdir(parents=True, exist_ok=True)
 
 MAX_CLASSES = 10
 
-prior = TabICLPriorDataLoader(
-    num_steps=1000,  # batches por época
-    batch_size=args.batch_size,
-    num_datapoints_min=args.min_rows,
-    num_datapoints_max=args.max_rows,
-    min_features=args.min_features,
-    max_features=args.max_features,
-    max_num_classes=MAX_CLASSES,
-    device=device,
-    prior_type=args.prior_type,
-    log_seq_len=True,
-    min_train_size=0.3,
-    max_train_size=0.9,
-)
+if args.prior_type == "omics":
+    # Ancho total log-uniforme hasta --max-features; --min-features no aplica (10-60 variables base)
+    prior = OmicsPriorDataLoader(
+        num_steps=1000,
+        batch_size=args.batch_size,
+        device=device,
+        config=OmicsPriorConfig(
+            min_rows=args.min_rows,
+            max_rows=args.max_rows,
+            max_total_features=args.max_features,
+            max_classes=MAX_CLASSES,
+        ),
+        min_train_size=0.3,
+        max_train_size=0.9,
+    )
+else:
+    prior = TabICLPriorDataLoader(
+        num_steps=1000,  # batches por época
+        batch_size=args.batch_size,
+        num_datapoints_min=args.min_rows,
+        num_datapoints_max=args.max_rows,
+        min_features=args.min_features,
+        max_features=args.max_features,
+        max_num_classes=MAX_CLASSES,
+        device=device,
+        prior_type=args.prior_type,
+        log_seq_len=True,
+        min_train_size=0.3,
+        max_train_size=0.9,
+    )
 
 model = NanoTabPFNModel(
     embedding_size=192,
