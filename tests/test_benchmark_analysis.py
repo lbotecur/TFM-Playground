@@ -21,6 +21,7 @@ def test_merge_variants_keeps_plain_row_where_both_exist():
 def test_short_name():
     assert short_name("workdir/graph_scm_base_w5000/epoch_100.pth [bfloat16]") == "graph_scm_base_w5000/epoch_100"
     assert short_name("tabpfn-3.5:auto") == "tabpfn-3.5:auto"
+    assert short_name("workdir/a/epoch_100.pth@ctx300 [bfloat16] [low-memory]") == "a/epoch_100@ctx300"
 
 
 def test_holm_matches_hand_computation():
