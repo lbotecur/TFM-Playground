@@ -9,7 +9,7 @@ import argparse
 
 import pandas as pd
 
-from tfmplayground.benchmarks.analysis import mean_table, paired
+from tfmplayground.benchmarks.analysis import mean_table, merge_variants, paired
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--results", nargs="+", default=["workdir/eval/benchmarks.csv"], help="one or more CSVs")
@@ -21,6 +21,7 @@ args = parser.parse_args()
 results = pd.concat([pd.read_csv(f) for f in args.results], ignore_index=True)
 if args.benchmark:
     results = results[results.benchmark == args.benchmark]
+results = merge_variants(results)  # "<model> [low-memory]" counts as <model>; pass --reference without the suffix
 pd.set_option("display.width", 250, "display.max_columns", 50, "display.max_colwidth", 60)
 
 print(f"Mean {args.metric} over folds\n")
