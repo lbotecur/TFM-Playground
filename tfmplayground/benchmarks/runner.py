@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from tfmplayground.benchmarks import mlomics
+from tfmplayground.benchmarks import hdlss, mlomics
 from tfmplayground.benchmarks.metrics import accuracy, roc_auc
 from tfmplayground.benchmarks.models import is_checkpoint, make_model, predict_proba
 
@@ -91,7 +91,7 @@ def compare(ours: pd.DataFrame, published: dict[str, pd.DataFrame], metric: str 
     return stats.reset_index()
 
 
-BENCHMARKS = {"mlomics": mlomics}  # each module: load_task(name, data_root) -> X, y, categorical; folds(y)
+BENCHMARKS = {"mlomics": mlomics, "hdlss": hdlss}  # each module: load_task(name, data_root) -> X, y, categorical; folds(y)
 RESULT_COLUMNS = ["benchmark", "dataset", "n_features", "model", "fold", "accuracy", "roc_auc", "seconds"]
 
 

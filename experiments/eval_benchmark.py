@@ -1,6 +1,7 @@
 """Evaluates models on benchmark datasets and appends per-fold results to one CSV (resumable).
 
-Datasets are "<benchmark>/<name>". For now: mlomics/<BRCA|COAD|GBM|LGG|OV>/<omics joined with +>.
+Datasets are "<benchmark>/<name>": mlomics/<BRCA|COAD|GBM|LGG|OV>/<omics joined with +>, or hdlss/<name>
+(the 15 scikit-feature datasets in tfmplayground.benchmarks.hdlss.DATASETS).
 Models: our checkpoints (paths), random_forest, logreg, logreg_en, xgboost, tabpfn-wide-5k,
 tabpfn-v2-gn2p4bpt, tabpfn-3.5 (":n8" = 8 ensemble members, ":auto" = package default, 8 members fixed by
 the checkpoint, ":cover" = enough members, ceil(features / 768) and at least 8, for every feature to be seen).
