@@ -18,6 +18,9 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"  # antes de import
 
 import argparse
 import json
+import subprocess
+import sys
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -58,7 +61,15 @@ device = torch.device(f"cuda:{args.gpu}")
 # Guarda los parámetros del run junto a sus checkpoints
 run_dir = Path("workdir") / args.run_name
 run_dir.mkdir(parents=True, exist_ok=True)
-(run_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
+# Each launch keeps its own record (command, git commit, start time), so a --resume with other options never
+# overwrites the settings of earlier launches; args.json keeps those of the first launch.
+started = datetime.now().strftime("%Y%m%d-%H%M%S")
+git = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True).stdout.strip()
+record = {**vars(args), "command": " ".join(sys.argv), "git_commit": git("rev-parse", "HEAD"),
+          "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no")), "started": started}
+(run_dir / f"args_{started}.json").write_text(json.dumps(record, indent=2))
+if not (run_dir / "args.json").exists():
+    (run_dir / "args.json").write_text(json.dumps(record, indent=2))
 
 MAX_CLASSES = 10
 
