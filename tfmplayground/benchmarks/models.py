@@ -6,6 +6,8 @@ for missing values) and the list of those columns. Each model is told about them
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import sklearn
 from sklearn.compose import ColumnTransformer
@@ -19,19 +21,36 @@ BASELINES = ("random_forest", "logreg", "logreg_en", "xgboost")
 # Foundation models from other packages, by name. A suffix ":n<k>" sets the number of ensemble members
 # (default 1, a single forward pass like our models and like TabPFN-Wide evaluates its own model);
 # ":auto" uses the package default. TabPFN-3.5 sees at most 768 features per ensemble member (TabPFN v2,
-# 500), so with one member it only sees a random subset of a wide table; "auto" adds members (8 to 32)
-# until every feature is seen by at least one, up to 32 x 768 features.
+# 500), so with one member it only sees a random subset of a wide table. Its checkpoint fixes the default
+# to 8 members (at most 8 x 768 = 6144 features seen). ":cover" (TabPFN-3.5 only) uses enough members,
+# at least 8, for every feature to be seen by at least one: ceil(features / 768).
 # They need their own packages (tabpfnwide, which pins tabpfn 9.0.0, which includes TabPFN-3.5).
 EXTERNAL = ("tabpfn-wide-5k", "tabpfn-v2-gn2p4bpt", "tabpfn-3.5")
 
 
 def parse_external(name: str) -> tuple[str, int | str]:
     """'tabpfn-3.5:n8' -> ('tabpfn-3.5', 8); 'tabpfn-3.5:auto' -> ('tabpfn-3.5', 'auto');
-    'tabpfn-3.5' -> ('tabpfn-3.5', 1)."""
+    'tabpfn-3.5:cover' -> ('tabpfn-3.5', 'cover'); 'tabpfn-3.5' -> ('tabpfn-3.5', 1)."""
     base, _, suffix = name.partition(":")
     if not suffix:
         return base, 1
-    return base, "auto" if suffix == "auto" else int(suffix.removeprefix("n"))
+    return base, suffix if suffix in ("auto", "cover") else int(suffix.removeprefix("n"))
+
+
+class FullFeatureCoverage:
+    """Builds the classifier at fit time with enough ensemble members for every feature to be seen by at
+    least one of them: max(minimum, ceil(features / features_per_member))."""
+
+    def __init__(self, make, features_per_member: int, minimum: int = 8):
+        self.make, self.features_per_member, self.minimum = make, features_per_member, minimum
+
+    def fit(self, X, y):
+        self.n_estimators_ = max(self.minimum, math.ceil(X.shape[1] / self.features_per_member))
+        self.model_ = self.make(self.n_estimators_).fit(X, y)
+        return self
+
+    def predict_proba(self, X):
+        return self.model_.predict_proba(X)
 
 
 def is_checkpoint(name: str) -> bool:
@@ -92,10 +111,15 @@ def make_model(name: str, device: str = "cuda", amp_dtype=None, categorical: lis
         from tabpfn import TabPFNClassifier
         from tabpfn.constants import ModelVersion
 
-        return TabPFNClassifier.create_default_for_version(
-            ModelVersion.V3_5, device=device, n_estimators=n_estimators, random_state=42,
-            ignore_pretraining_limits=True, **tabpfn_categorical,
-        )
+        def tabpfn_35(n):
+            return TabPFNClassifier.create_default_for_version(
+                ModelVersion.V3_5, device=device, n_estimators=n, random_state=42,
+                ignore_pretraining_limits=True, **tabpfn_categorical,
+            )
+
+        if n_estimators == "cover":
+            return FullFeatureCoverage(tabpfn_35, features_per_member=768)
+        return tabpfn_35(n_estimators)
     from tfmplayground.interface import NanoTabPFNClassifier  # needs torch, only imported here
 
     if categorical is None:

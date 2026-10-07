@@ -2,8 +2,9 @@
 
 Datasets are "<benchmark>/<name>". For now: mlomics/<BRCA|COAD|GBM|LGG|OV>/<omics joined with +>.
 Models: our checkpoints (paths), random_forest, logreg, logreg_en, xgboost, tabpfn-wide-5k,
-tabpfn-v2-gn2p4bpt, tabpfn-3.5 (":n8" = 8 ensemble members, ":auto" = package default, enough members
-to see every feature). External models need tfm_ext.
+tabpfn-v2-gn2p4bpt, tabpfn-3.5 (":n8" = 8 ensemble members, ":auto" = package default, 8 members fixed by
+the checkpoint, ":cover" = enough members, ceil(features / 768) and at least 8, for every feature to be seen).
+External models need tfm_ext.
 
 Example, from the repo root:
     python experiments/eval_benchmark.py --gpu 0 --bf16 \\

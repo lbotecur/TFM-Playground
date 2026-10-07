@@ -92,6 +92,8 @@ def test_external_model_names():
     assert parse_external("tabpfn-3.5") == ("tabpfn-3.5", 1)
     assert parse_external("tabpfn-3.5:n8") == ("tabpfn-3.5", 8)
     assert parse_external("tabpfn-3.5:auto") == ("tabpfn-3.5", "auto")
+    assert parse_external("tabpfn-3.5:cover") == ("tabpfn-3.5", "cover")
+    assert not is_checkpoint("tabpfn-3.5:cover")
     assert not is_checkpoint("tabpfn-3.5:auto")
     assert not is_checkpoint("tabpfn-wide-5k") and not is_checkpoint("tabpfn-v2-gn2p4bpt:n8")
     assert not is_checkpoint("random_forest") and not is_checkpoint("logreg")
@@ -170,3 +172,26 @@ def test_paired_leaves_out_nan_folds():
     p = paired(pd.DataFrame(rows), "a", "ref")
     assert (p["folds"], p["wins"], p["losses"]) == (2, 1, 1)
     assert p["mean_diff"] == pytest.approx(0.025)
+
+
+def test_full_feature_coverage_sizes_the_ensemble_at_fit_time():
+    from tfmplayground.benchmarks.models import FullFeatureCoverage
+
+    built = []
+
+    class Fake:
+        def __init__(self, n):
+            built.append(n)
+
+        def fit(self, X, y):
+            return self
+
+        def predict_proba(self, X):
+            return np.full((len(X), 2), 0.5)
+
+    X, y = np.zeros((10, 18206)), np.arange(10) % 2
+    model = FullFeatureCoverage(Fake, features_per_member=768).fit(X, y)
+    assert built == [24] and model.n_estimators_ == 24  # ceil(18206 / 768)
+    FullFeatureCoverage(Fake, features_per_member=768).fit(np.zeros((10, 300)), y)
+    assert built[-1] == 8  # at least the default 8
+    assert model.predict_proba(X).shape == (10, 2)
