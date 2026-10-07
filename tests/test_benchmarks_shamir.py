@@ -49,3 +49,13 @@ def test_omics_are_standardized_over_all_samples(tmp_path):
 def test_folds():
     y = np.arange(50) % 3
     assert len(shamir.folds(y)) == 5
+
+
+def test_classes_with_fewer_patients_than_folds_are_left_out(tmp_path):
+    samples, labels = _fake_shamir(tmp_path)
+    clinical_path = tmp_path / shamir.FOLDER / "clinical" / "clinical" / "breast"
+    clinical = pd.read_table(clinical_path)
+    clinical.loc[[0, 1], "PAM50Call_RNAseq"] = "Normal"  # a class with only 2 patients
+    clinical.to_csv(clinical_path, sep="\t", index=False)
+    X, y = shamir.load("breast", tmp_path, ("mrna",))
+    assert len(set(y)) == 3 and X.shape[0] == 25  # 27 aligned patients minus the 2 "Normal" ones

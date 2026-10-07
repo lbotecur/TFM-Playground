@@ -5,9 +5,10 @@ breast PAM50, gbm expression subtype and sarcoma histological type. Their colon 
 left out.
 
 Prepared as they do: each omic is standardized over all samples, duplicated samples are dropped, and only
-patients with all three omics and a label are kept. One difference: they intersect the samples through a
-Python set, so their row order (and their folds) changes from run to run; here the samples are sorted, so the
-folds are reproducible. Their per-fold results are not published, so every model is run here.
+patients with all three omics and a label are kept. Two differences: classes with fewer than 5 patients are left
+out (see load); and they intersect the samples through a Python set, so their row order (and their folds)
+changes from run to run, while here the samples are sorted and the folds are reproducible. Their per-fold
+results are not published, so every model is run here.
 
 Data: https://acgt.cs.tau.ac.il/multi_omic_benchmark/download.html, each zip unpacked in its own folder:
 <data_root>/Shamir/<cancer>/{exp,methy,mirna} and <data_root>/Shamir/clinical/clinical/<cancer>.
@@ -46,7 +47,9 @@ def _load_omic(path: Path) -> pd.DataFrame:
 
 def load(dataset: str, root: str | Path, omics: tuple[str, ...]) -> tuple[pd.DataFrame, np.ndarray]:
     """Features (samples x features, omics concatenated in the given order) and encoded subtype labels of
-    the patients that have every omic of the dataset and a label, sorted by sample ID."""
+    the patients that have every omic of the dataset and a label, sorted by sample ID. Classes with fewer
+    patients than folds (5) are left out: they cannot be in every test fold, and sarcoma would otherwise have
+    11 classes (4 of them with 1-2 patients), more than the 10 our models and TabPFN accept."""
     assert dataset in DATASETS, f"{dataset} not in {DATASETS}"
     folder = Path(root) / FOLDER
     data = {omic: _load_omic(folder / dataset / file) for omic, file in OMIC_FILES.items()}
@@ -54,6 +57,8 @@ def load(dataset: str, root: str | Path, omics: tuple[str, ...]) -> tuple[pd.Dat
     labels = clinical.set_index(clinical["sampleID"].map(_key))[LABEL_COLUMNS[dataset]].dropna()
     labels = labels[~labels.index.duplicated(keep="first")]
     samples = sorted(set(labels.index).intersection(*(set(d.index) for d in data.values())))
+    counts = labels.loc[samples].value_counts()
+    samples = [s for s in samples if counts[labels[s]] >= N_SPLITS]  # a class must reach every test fold
     X = pd.concat([data[omic].loc[samples] for omic in omics], axis=1)
     return X, LabelEncoder().fit_transform(labels.loc[samples].to_numpy())
 
