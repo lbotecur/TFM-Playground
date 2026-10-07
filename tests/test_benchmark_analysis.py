@@ -34,3 +34,8 @@ def test_ranks_friedman_and_reference():
     assert res["datasets"] == 3 and res["models"] == 3 and res["cd"] > 0
     comp = against_reference(table, "a").set_index("model")
     assert comp.loc["b", "losses"] == 4 and comp.loc["c", "datasets"] == 3
+
+
+def test_friedman_with_two_models_is_skipped():
+    res = friedman_nemenyi(pd.DataFrame({"a": [0.9, 0.8, 0.7], "b": [0.8, 0.7, 0.6]}))
+    assert res["models"] == 2 and np.isnan(res["p"])
