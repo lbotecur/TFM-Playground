@@ -195,3 +195,31 @@ def test_full_feature_coverage_sizes_the_ensemble_at_fit_time():
     FullFeatureCoverage(Fake, features_per_member=768).fit(np.zeros((10, 300)), y)
     assert built[-1] == 8  # at least the default 8
     assert model.predict_proba(X).shape == (10, 2)
+
+
+def test_context_chunks_split_balance_and_average():
+    from tfmplayground.benchmarks.models import ContextChunks, parse_checkpoint
+
+    assert parse_checkpoint("w/epoch_100.pth@ctx300") == ("w/epoch_100.pth", 300)
+    assert parse_checkpoint("w/epoch_100.pth") == ("w/epoch_100.pth", None)
+
+    class Fake:  # predicts the class frequencies of its context
+        sizes = []
+
+        def fit(self, X, y):
+            self.classes_, counts = np.unique(y, return_counts=True)
+            self.p, Fake.sizes = counts / counts.sum(), Fake.sizes + [len(y)]
+            return self
+
+        def predict_proba(self, X):
+            return np.tile(self.p, (len(X), 1))
+
+    y = np.array([0] * 600 + [1] * 395 + [2] * 5)  # class 2 rarer than the number of chunks
+    model = ContextChunks(Fake(), max_rows=300).fit(np.zeros((1000, 3)), y)
+    chunks = model.chunks()
+    assert len(chunks) == 4 and all(set(y[c]) == {0, 1, 2} for c in chunks)
+    assert max(len(c) for c in chunks) <= 250 + 5  # 995 rows round robin + the 5 rare ones in every chunk
+    proba = model.predict_proba(np.zeros((7, 3)))
+    assert proba.shape == (7, 3) and np.allclose(proba.sum(1), 1)
+    small = ContextChunks(Fake(), max_rows=300).fit(np.zeros((200, 3)), np.arange(200) % 2)
+    assert len(small.chunks()) == 1 and len(small.chunks()[0]) == 200  # plain model

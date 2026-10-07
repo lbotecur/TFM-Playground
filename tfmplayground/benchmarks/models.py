@@ -53,6 +53,53 @@ class FullFeatureCoverage:
         return self.model_.predict_proba(X)
 
 
+class ContextChunks:
+    """Our checkpoints were pretrained on tables of at most 300 rows. For a larger training set, splits its
+    rows into k = ceil(rows / max_rows) stratified chunks, predicts with each chunk as the context and
+    averages the probabilities. Every chunk holds every class: a class with fewer rows than chunks has all its
+    rows in every chunk. With rows <= max_rows it is exactly the plain model."""
+
+    def __init__(self, model, max_rows: int = 300, seed: int = 42):
+        self.model, self.max_rows, self.seed = model, max_rows, seed
+
+    def fit(self, X, y):
+        self.X_, self.y_ = np.asarray(X), np.asarray(y)
+        self.classes_ = np.unique(self.y_)
+        return self
+
+    def chunks(self) -> list[np.ndarray]:
+        k = math.ceil(len(self.y_) / self.max_rows)
+        if k <= 1:
+            return [np.arange(len(self.y_))]
+        rng, chunks, position = np.random.default_rng(self.seed), [[] for _ in range(k)], 0
+        for c in self.classes_:
+            rows = rng.permutation(np.flatnonzero(self.y_ == c))
+            if len(rows) < k:
+                for chunk in chunks:
+                    chunk.extend(rows)
+                continue
+            for row in rows:  # round robin, continuing where the previous class stopped: equal sizes
+                chunks[position % k].append(row)
+                position += 1
+        return [np.sort(np.array(chunk)) for chunk in chunks]
+
+    def predict_proba(self, X):
+        chunks = self.chunks()
+        proba = np.zeros((len(X), len(self.classes_)))
+        for rows in chunks:
+            self.model.fit(self.X_[rows], self.y_[rows])
+            columns = np.searchsorted(self.classes_, self.model.classes_)
+            proba[:, columns] += np.asarray(self.model.predict_proba(X))
+        return proba / len(chunks)
+
+
+def parse_checkpoint(name: str) -> tuple[str, int | None]:
+    """'path.pth@ctx300' -> ('path.pth', 300): our checkpoint with ContextChunks(max_rows=300);
+    'path.pth' -> ('path.pth', None)."""
+    path, _, variant = name.partition("@")
+    return path, int(variant.removeprefix("ctx")) if variant else None
+
+
 def is_checkpoint(name: str) -> bool:
     """True for one of our checkpoints (a path), which is evaluated with NanoTabPFNClassifier."""
     return name not in BASELINES and parse_external(name)[0] not in EXTERNAL
@@ -79,7 +126,7 @@ def make_model(name: str, device: str = "cuda", amp_dtype=None, categorical: lis
                low_memory: bool = False):
     """Baselines (BASELINES), other foundation models (EXTERNAL) or, for any other name, the path of one
     of our checkpoints, evaluated with NanoTabPFNClassifier without ensembling (one forward pass), as
-    TabPFN-Wide evaluates its own model. amp_dtype (e.g. torch.bfloat16) only applies to our checkpoints.
+    TabPFN-Wide evaluates its own model; "<path>@ctx300" wraps it in ContextChunks(max_rows=300). amp_dtype (e.g. torch.bfloat16) only applies to our checkpoints.
     categorical: indices of the categorical columns ([] = all numeric). None keeps each model's own
     automatic detection (what the first MLOmics evaluations used). low_memory only applies to our
     checkpoints (see NanoTabPFNClassifier): for tables of tens of thousands of features."""
@@ -122,12 +169,14 @@ def make_model(name: str, device: str = "cuda", amp_dtype=None, categorical: lis
         return tabpfn_35(n_estimators)
     from tfmplayground.interface import NanoTabPFNClassifier  # needs torch, only imported here
 
+    path, max_rows = parse_checkpoint(name)
     if categorical is None:
-        return NanoTabPFNClassifier(model=name, device=device, amp_dtype=amp_dtype, low_memory=low_memory)
-    # Declared types only: without this, numeric columns with few distinct values (e.g. copy-number
-    # levels, or genes with many zeros) would be inferred categorical.
-    return NanoTabPFNClassifier(model=name, device=device, amp_dtype=amp_dtype, low_memory=low_memory,
-                                categorical_features=list(categorical), infer_categorical=False)
+        model = NanoTabPFNClassifier(model=path, device=device, amp_dtype=amp_dtype, low_memory=low_memory)
+    else:  # Declared types only: without this, numeric columns with few distinct values (e.g. copy-number
+        # levels, or genes with many zeros) would be inferred categorical.
+        model = NanoTabPFNClassifier(model=path, device=device, amp_dtype=amp_dtype, low_memory=low_memory,
+                                     categorical_features=list(categorical), infer_categorical=False)
+    return ContextChunks(model, max_rows) if max_rows else model
 
 
 def predict_proba(model, X_train: np.ndarray, y_train: np.ndarray, X_test: np.ndarray) -> np.ndarray:

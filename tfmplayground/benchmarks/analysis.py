@@ -52,12 +52,12 @@ def merge_variants(results: pd.DataFrame, suffix: str = LOW_MEMORY) -> pd.DataFr
 
 
 def short_name(label: str) -> str:
-    """'workdir/graph_scm_base_w5000/epoch_100.pth [bfloat16]' -> 'graph_scm_base_w5000/epoch_100'."""
-    label = label.split(" [")[0]
+    """'workdir/graph_scm_base_w5000/epoch_100.pth [bfloat16]' -> 'graph_scm_base_w5000/epoch_100';
+    a variant after '@' is kept: '...epoch_100.pth@ctx300 [bfloat16]' -> '...epoch_100@ctx300'."""
+    label, at, variant = label.split(" [")[0].partition("@")
     if label.endswith(".pth"):
-        parts = label[:-4].split("/")
-        return "/".join(parts[-2:])
-    return label
+        label = "/".join(label[:-4].split("/")[-2:])
+    return f"{label}@{variant}" if at else label
 
 
 def omic(dataset: str) -> str:
