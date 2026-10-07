@@ -84,6 +84,8 @@ def friedman_nemenyi(table: pd.DataFrame, alpha: float = 0.05) -> dict:
 
     complete = table.dropna()
     n, k = complete.shape
+    if k < 3:  # Friedman needs three or more models; with two, against_reference already gives the Wilcoxon test
+        return {"datasets": n, "models": k, "chi2": np.nan, "p": np.nan, "cd": np.nan}
     stat, p = friedmanchisquare(*[complete[c].to_numpy() for c in complete.columns])
     q = studentized_range.ppf(1 - alpha, k, np.inf) / np.sqrt(2)
     return {"datasets": n, "models": k, "chi2": float(stat), "p": float(p),
