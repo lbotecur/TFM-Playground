@@ -278,5 +278,7 @@ def test_train_writes_step_log(tmp_path, monkeypatch):
           run_name="run", log_every=2, step_log_path=str(path))
 
     lines = path.read_text().strip().splitlines()
-    assert lines[0] == "epoch,batch,tables,loss,data_wait_s,seconds"
+    assert lines[0] == "epoch,batch,tables,loss,data_wait_s,seconds,grad_norm,clipped"
     assert [line.split(",")[:3] for line in lines[1:]] == [["1", "2", "4"], ["1", "4", "8"]]
+    grad_norm, clipped = map(float, lines[1].split(",")[6:])
+    assert grad_norm > 0 and 0 <= clipped <= 1

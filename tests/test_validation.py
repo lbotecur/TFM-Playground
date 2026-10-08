@@ -51,3 +51,16 @@ def test_prior_sets_are_built_once_and_reused(tmp_path, monkeypatch):
     again = validation.load_prior_sets(tmp_path, n_tables=2, names=["tiny"])
     assert (tmp_path / "tiny_n2.pt").stat().st_mtime == before
     assert torch.equal(again["tiny"][0]["x"], t["x"])
+
+
+def test_prior_metrics_classifier_counts_only_classes_seen_in_training():
+    """A test row of a class absent from the training rows is left out (no model can predict it); a model that
+    separates the classes perfectly gets a loss near zero on the rest."""
+    from tfmplayground.validation import prior_metrics_classifier
+
+    rng = np.random.default_rng(0)
+    y = torch.tensor([0, 1] * 20 + [2, 0, 1, 2], dtype=torch.float32)  # class 2 only among the test rows
+    x = torch.tensor(rng.normal(size=(44, 1)) * 0.01, dtype=torch.float32) + 10 * y[:, None]
+    tables = [{"x": x, "y": y, "split": 40}]
+    metrics = prior_metrics_classifier("logreg", tables, "cpu")
+    assert metrics["accuracy"] == 1.0 and metrics["loss"] < 0.1
