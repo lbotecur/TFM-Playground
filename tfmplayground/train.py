@@ -77,8 +77,9 @@ def train(
             Counted in optimizer steps, i.e. batches / accumulate_gradients. 0 disables it.
         step_log_path: (str, optional) CSV to append a row to every log_every batches: epoch, batch, tables
             trained on so far in the run (from this launch), mean loss of the window, seconds spent waiting
-            for the prior in the window and seconds since the epoch started. Waiting time near the window's
-            time means the prior, not the GPU, limits training.
+            for the prior in the window, seconds since the epoch started, mean gradient norm before clipping
+            and the fraction of optimizer steps clipped (norm > 1). Waiting time near the window's time means
+            the prior, not the GPU, limits training.
 
     Returns:
         (torch.Tensor) a tensor of shape (num_rows, batch_size, num_features, embedding_size)
@@ -108,7 +109,7 @@ def train(
         new_file = not os.path.exists(step_log_path)
         step_log = open(step_log_path, "a")
         if new_file:
-            step_log.write("epoch,batch,tables,loss,data_wait_s,seconds\n")
+            step_log.write("epoch,batch,tables,loss,data_wait_s,seconds,grad_norm,clipped\n")
     tables_seen = 0
     try:
         for epoch in range(ckpt["epoch"] + 1 if ckpt else 1, epochs + 1):
@@ -120,6 +121,7 @@ def train(
             window_loss = 0.0  # summed loss since the last step log (see log_every)
             optimizer.zero_grad()  # do not carry a partial accumulation over from the previous epoch
             window_wait = 0.0  # seconds spent waiting for the prior since the last step log
+            window_norms = []  # gradient norms (before clipping) of the optimizer steps since the last step log
             batches = iter(prior)
             while True:
                 fetch_start = time.time()
@@ -195,16 +197,21 @@ def train(
                         flush=True,
                     )
                     if step_log:
+                        norms = torch.tensor(window_norms or [float("nan")])
                         step_log.write(f"{epoch},{num_batches},{tables_seen},{window_loss / log_every:.5f},"
-                                       f"{window_wait:.2f},{elapsed:.1f}\n")
+                                       f"{window_wait:.2f},{elapsed:.1f},{norms.mean():.4f},"
+                                       f"{(norms > 1.0).float().mean():.3f}\n")
                         step_log.flush()
                     window_loss = 0.0
                     window_wait = 0.0
+                    window_norms = []
 
                 # Step on trained batches, not on the loop index: a skipped batch must not shift
                 # the accumulation groups.
                 if num_batches % accumulate_gradients == 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    # The norm before clipping is logged: if most steps are clipped, the update size is set
+                    # by the clipping, not by the learning rate.
+                    window_norms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item())
                     optimizer.step()
                     optimizer.zero_grad()
 

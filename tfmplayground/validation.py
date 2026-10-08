@@ -104,6 +104,31 @@ def prior_metrics(model, tables: list[dict], device, amp_dtype=torch.bfloat16) -
     return {"loss": float(np.mean(loss)), "accuracy": float(np.mean(accuracy)), "baseline_loss": float(np.mean(baseline))}
 
 
+def prior_metrics_classifier(name: str, tables: list[dict], device) -> dict:
+    """Held-out prior loss of any model through its classifier interface (fit on the training rows, predict the
+    test rows), so ours and other models are compared on the same tables. Only test rows whose class appears in
+    the training rows count, since no classifier can give probability to a class it never saw. The reference
+    is TabICL v2, trained at length on this same prior: its loss estimates how low the prior lets a model go,
+    and the gap to ours how much training can still gain."""
+    from tfmplayground.benchmarks.models import is_checkpoint, make_model, predict_proba
+
+    ours = is_checkpoint(name)
+    loss, accuracy = [], []
+    for t in tables:
+        x, y, split = t["x"].numpy(), t["y"].long().numpy(), t["split"]
+        y_train, y_test = y[:split], y[split:]
+        seen = np.isin(y_test, y_train)
+        if len(np.unique(y_train)) < 2 or not seen.any():
+            continue
+        model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[])
+        proba = predict_proba(model, x[:split], y_train, x[split:][seen])
+        classes = np.unique(y_train)  # the column order of predict_proba for every model here
+        p_true = proba[np.arange(seen.sum()), np.searchsorted(classes, y_test[seen])]
+        loss.append(float(-np.log(np.clip(p_true, 1e-7, 1)).mean()))
+        accuracy.append(float((classes[proba.argmax(1)] == y_test[seen]).mean()))
+    return {"loss": float(np.mean(loss)), "accuracy": float(np.mean(accuracy))}
+
+
 def probe_signal(task: str, n: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
     """Relevant features and binary labels of one probe task."""
     if task == "linear":  # 5 features, labels from a noisy linear score: no interaction needed

@@ -25,7 +25,11 @@ BASELINES = ("random_forest", "logreg", "logreg_en", "xgboost")
 # to 8 members (at most 8 x 768 = 6144 features seen). ":cover" (TabPFN-3.5 only) uses enough members,
 # at least 8, for every feature to be seen by at least one: ceil(features / 768).
 # They need their own packages (tabpfnwide, which pins tabpfn 9.0.0, which includes TabPFN-3.5).
-EXTERNAL = ("tabpfn-wide-5k", "tabpfn-v2-gn2p4bpt", "tabpfn-3.5")
+EXTERNAL = ("tabpfn-wide-5k", "tabpfn-v2-gn2p4bpt", "tabpfn-3.5", "tabicl-v2", "tabicl-v1.1")
+# TabICL checkpoints (package tabicl). v2 was trained on the graph_scm prior we train on, so it is the reference
+# for how far that prior can take a model. TabICL detects categorical columns itself.
+TABICL_CHECKPOINTS = {"tabicl-v2": "tabicl-classifier-v2-20260212.ckpt",
+                      "tabicl-v1.1": "tabicl-classifier-v1.1-20250506.ckpt"}
 
 
 def parse_external(name: str) -> tuple[str, int | str]:
@@ -154,6 +158,13 @@ def make_model(name: str, device: str = "cuda", amp_dtype=None, categorical: lis
         path = hf_hub_download(repo_id="Prior-Labs/TabPFN-v2-clf", filename="tabpfn-v2-classifier-gn2p4bpt.ckpt")
         return TabPFNClassifier(model_path=path, device=device, n_estimators=n_estimators, random_state=42,
                                 ignore_pretraining_limits=True, **tabpfn_categorical)
+    if base in TABICL_CHECKPOINTS:
+        from tabicl import TabICLClassifier
+
+        if n_estimators == "cover":
+            raise ValueError(":cover is only for tabpfn-3.5")
+        return TabICLClassifier(checkpoint_version=TABICL_CHECKPOINTS[base], device=device, random_state=42,
+                                n_estimators=8 if n_estimators == "auto" else n_estimators)
     if base == "tabpfn-3.5":
         from tabpfn import TabPFNClassifier
         from tabpfn.constants import ModelVersion
