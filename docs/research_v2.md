@@ -72,6 +72,8 @@ a next version.
    run once, on the final model of this research, and reported with the first model.
 2. Runs are compared at an equal number of tables trained on (from `steps.csv`), not epochs.
 3. Every run keeps its launch command and commit (`args_<time>.json`).
+4. The runs of the final recipe use `--seed` (initial weights and the prior's tables; the same seed and number
+   of workers give the same tables), so they can be reproduced and a twin can see exactly the same data.
 
 ## Plan
 
@@ -126,3 +128,14 @@ widening.
 
 **Targets for the final model** (validation only): XOR-3 with 1000 rows >= 0.90, XOR-2 with 300 rows >= 0.98,
 linear with 480 noise features >= 0.95, and held-out loss no worse than w5000 epoch 100 on any set.
+
+## Later: interpretability, then a weight-sparse twin
+
+Decided on 2026-10-08: interpretability is studied on the good model, not before (interpreting a weak model
+mostly describes its weaknesses). Order:
+1. Attribution (feature attention) against known ground truth (synthetic probes) and PAM50 on Shamir breast.
+2. Mechanistic analysis of the dense model: sparse autoencoders, circuits by pruning and head ablation on the
+   synthetic tasks.
+3. A weight-sparse twin (as in Gao et al. 2025, "Understanding neural networks through sparse circuits"):
+   the final recipe, seed, workers and tables unchanged, only the weights constrained to be sparse, at 2-3
+   levels of sparsity, to measure what capability is lost and compare how interpretable each one is.

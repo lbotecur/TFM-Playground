@@ -2,6 +2,7 @@
 
 import random
 
+import numpy as np
 import torch
 from tabicl.prior import PriorDataset as TabICLPriorDataset
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
@@ -29,10 +30,21 @@ def parse_prior_types(prior_type: str, weights: list[float] | None = None) -> tu
     return types, [w / sum(weights) for w in weights]
 
 
+def _seed_generation(seed: int, epoch: int, worker: int):
+    """Seeds the generators TabICL draws from (numpy's global one, torch, random) for one worker in one epoch,
+    so with a run seed the tables of every epoch are fixed whatever happened before (e.g. a --resume)."""
+    s = (seed * 1_000_003 + epoch * 10_007 + worker) % (2**32)
+    random.seed(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+
+
 class _TabICLBatches(IterableDataset):
     """Yields usable batches (on the CPU) from TabICL priors. In a DataLoader with workers, every worker
     builds its own priors and yields its share of the steps, so the steps of an epoch add up to num_steps.
-    Each worker gets a different seed from the DataLoader (torch, random and numpy are reseeded per worker)."""
+    Without a seed, each worker gets a different random seed from the DataLoader. With one, each (epoch,
+    worker) gets a fixed seed and the DataLoader returns the workers' batches in a fixed order, so the same
+    seed and number of workers give the same tables."""
 
     def __init__(self, loader: "TabICLPriorDataLoader"):
         self.loader = loader
@@ -43,6 +55,9 @@ class _TabICLBatches(IterableDataset):
         steps = self.loader.num_steps // workers + (index < self.loader.num_steps % workers)
         if worker is not None:
             torch.set_num_threads(1)  # one core per worker: the workers already use all the cores given
+        seed = getattr(self.loader, "seed", None)
+        if seed is not None:
+            _seed_generation(seed, self.loader.epoch, index)
         for _ in range(steps):
             yield self.loader._next_valid_batch(to_device=False)
 
@@ -66,6 +81,8 @@ class TabICLPriorDataLoader(DataLoader):
         batch_size_per_gp: int | None = None,
         prior_weights: list[float] | None = None,
         graph_fct_types: str | None = None,
+        seed: int | None = None,
+        epoch: int = 0,
     ):
         """prior_type: one TabICL prior ('graph_scm', 'tree_scm', ...) or several joined by '+', each batch
         drawn from one of them with probabilities prior_weights (equal by default).
@@ -73,7 +90,10 @@ class TabICLPriorDataLoader(DataLoader):
         Generating the tables on the CPU is what limits training speed, so give it the cores available.
         batch_size_per_gp: datasets per group of the batch; a group shares the prior's sampled
         hyperparameters. None = the whole batch is one group (what all runs before 2026-10 used).
-        graph_fct_types: random function types of graph_scm (see graph_prior_config); None = defaults."""
+        graph_fct_types: random function types of graph_scm (see graph_prior_config); None = defaults.
+        seed: makes the tables reproducible: the same seed, number of workers and settings give the same tables
+        in every epoch. None = random (all runs before 2026-10). epoch: epochs already done (for a resumed
+        run, so it continues the sequence instead of repeating its first epochs)."""
         self.num_steps = num_steps
         self.batch_size = batch_size
         self.num_datapoints_min = num_datapoints_min
@@ -99,12 +119,15 @@ class TabICLPriorDataLoader(DataLoader):
             n_jobs=1,
         )
         self.graph_fct_types = graph_fct_types
+        self.seed = seed
+        self.epoch = epoch  # incremented at the start of every epoch (iteration over the loader)
         self._priors = None  # built on first use, in the process (or worker) that generates
         self._batches = None
         if num_workers > 0:
+            # With a seed the workers are started again every epoch, so each one gets that epoch's seed.
             self._batches = DataLoader(
-                _TabICLBatches(self), batch_size=None, num_workers=num_workers, persistent_workers=True,
-                prefetch_factor=4,
+                _TabICLBatches(self), batch_size=None, num_workers=num_workers,
+                persistent_workers=seed is None, prefetch_factor=4,
             )
 
     @property
@@ -163,9 +186,11 @@ class TabICLPriorDataLoader(DataLoader):
                 )
 
     def __iter__(self):
+        if getattr(self, "seed", None) is not None:
+            self.epoch += 1
         if getattr(self, "_batches", None) is not None:
             return iter(self._batches)
-        return iter(self._next_valid_batch() for _ in range(self.num_steps))
+        return iter(_TabICLBatches(self))
 
     def __len__(self):
         return self.num_steps
