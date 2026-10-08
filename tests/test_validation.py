@@ -64,3 +64,29 @@ def test_prior_metrics_classifier_counts_only_classes_seen_in_training():
     tables = [{"x": x, "y": y, "split": 40}]
     metrics = prior_metrics_classifier("logreg", tables, "cpu")
     assert metrics["accuracy"] == 1.0 and metrics["loss"] < 0.1
+
+
+def _write_dev(tmp_path, name, X, y):
+    from scipy.io import savemat
+
+    folder = tmp_path / "HDLSS_dev"
+    folder.mkdir(exist_ok=True)
+    savemat(folder / f"{name}.mat", {"X": X, "Y": y.reshape(-1, 1)})
+
+
+def test_dev_dataset_drops_classes_smaller_than_the_folds_and_runs(tmp_path):
+    """A class with fewer rows than folds is dropped, labels become 0..C-1, every fold's training rows hold
+    every class, and run_dev gives AUROC and accuracy per fold (missing files are skipped)."""
+    from tfmplayground.validation import dev_folds, load_dev_dataset, run_dev
+
+    rng = np.random.default_rng(0)
+    y = np.array([5] * 20 + [7] * 20 + [9] * 2)  # class 9 has 2 rows < 3 folds
+    X = rng.normal(size=(len(y), 6)) + (y[:, None] == 7) * 3.0
+    _write_dev(tmp_path, "toy", X, y)
+    Xd, yd = load_dev_dataset("toy", tmp_path)
+    assert len(yd) == 40 and set(yd) == {0, 1}
+    assert all(set(yd[train]) == {0, 1} for train, _ in dev_folds(yd))
+    rows = run_dev("logreg", "cpu", tmp_path, datasets=("toy", "missing"))
+    assert {r["set"] for r in rows} == {"dev_toy"}
+    assert len(rows) == 2 * len(dev_folds(yd))
+    assert min(r["value"] for r in rows if r["metric"] == "roc_auc") > 0.9

@@ -5,6 +5,9 @@ Two parts:
 - Held-out prior tables: tables drawn once from the prior with a fixed seed and saved, never trained on. The
   model's cross-entropy on them, at several table sizes, gives clean learning curves (the training loss mixes
   tables of every size and difficulty). Compared with the loss of predicting the training-class frequencies.
+- Development datasets: real high-dimensional datasets from scikit-feature that are not among the 15 of the
+  HDLSS benchmark (nor in any other paper benchmark), in their own folder, to check that what improves on
+  the prior also improves on real data.
 - Synthetic probes: tasks with a known structure (XOR of 2 and 3 features, a linear signal among 480 noise
   features, madelon's own generator) at several training sizes. They measure whether the model learned to use
   feature interactions and to ignore noise, which the held-out loss averages away.
@@ -36,6 +39,13 @@ PROBES = [
     ("madelon_like", 1000, 0), ("madelon_like", 1000, 480),
 ]
 PROBE_TEST_ROWS = 500
+
+# Development datasets (scikit-feature .mat files in <data_root>/HDLSS_dev): gene expression (GLIOMA, lymphoma,
+# nci9, lung_discrete), images as wide tables (warpPIE10P, orlraws10P) and many rows (USPS). None of them is in
+# HDLSS, MLOmics, Shamir or TabArena. Carcinom is left out: 11 classes, more than the model's 10.
+DEV_FOLDER = "HDLSS_dev"
+DEV_DATASETS = ("GLIOMA", "lymphoma", "nci9", "lung_discrete", "warpPIE10P", "orlraws10P", "USPS")
+DEV_SPLITS, DEV_SEED, DEV_LARGE = 3, 42, 2500  # stratified 3-fold, 2 repeats (1 with DEV_LARGE rows or more)
 
 
 def _seed_everything(seed: int):
@@ -127,6 +137,52 @@ def prior_metrics_classifier(name: str, tables: list[dict], device) -> dict:
         loss.append(float(-np.log(np.clip(p_true, 1e-7, 1)).mean()))
         accuracy.append(float((classes[proba.argmax(1)] == y_test[seen]).mean()))
     return {"loss": float(np.mean(loss)), "accuracy": float(np.mean(accuracy))}
+
+
+def load_dev_dataset(name: str, data_root: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """Features and labels 0..C-1 of a development dataset, rows shuffled with a fixed seed, classes with fewer
+    rows than folds dropped (so every class is in every training fold)."""
+    import scipy.sparse
+    from scipy.io import loadmat
+    from sklearn.preprocessing import LabelEncoder
+    from sklearn.utils import shuffle
+
+    data = loadmat(Path(data_root) / DEV_FOLDER / f"{name}.mat")
+    X, y = data["X"], np.asarray(data["Y"]).ravel()
+    if scipy.sparse.issparse(X):
+        X = X.toarray()
+    X, y = shuffle(np.asarray(X, dtype=np.float32), y, random_state=DEV_SEED)
+    labels, counts = np.unique(y, return_counts=True)
+    keep = np.isin(y, labels[counts >= DEV_SPLITS])
+    return X[keep], LabelEncoder().fit_transform(y[keep])
+
+
+def dev_folds(y: np.ndarray):
+    from sklearn.model_selection import RepeatedStratifiedKFold
+
+    repeats = 2 if len(y) < DEV_LARGE else 1
+    cv = RepeatedStratifiedKFold(n_splits=DEV_SPLITS, n_repeats=repeats, random_state=DEV_SEED)
+    return list(cv.split(np.zeros(len(y)), y))
+
+
+def run_dev(name: str, device: str, data_root: str | Path, datasets=DEV_DATASETS) -> list[dict]:
+    """AUROC and accuracy of model `name` on every fold of the development datasets (set 'dev_<dataset>', seed =
+    fold). Datasets whose file is missing are skipped."""
+    from tfmplayground.benchmarks.metrics import accuracy, roc_auc
+    from tfmplayground.benchmarks.models import is_checkpoint, make_model, predict_proba
+
+    ours = is_checkpoint(name)
+    rows = []
+    for dataset in datasets:
+        if not (Path(data_root) / DEV_FOLDER / f"{dataset}.mat").exists():
+            continue
+        X, y = load_dev_dataset(dataset, data_root)
+        for fold, (train, test) in enumerate(dev_folds(y)):
+            model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[])
+            proba = predict_proba(model, X[train], y[train], X[test])
+            rows += [{"set": f"dev_{dataset}", "seed": fold, "metric": "roc_auc", "value": roc_auc(y[test], proba)},
+                     {"set": f"dev_{dataset}", "seed": fold, "metric": "accuracy", "value": accuracy(y[test], proba)}]
+    return rows
 
 
 def probe_signal(task: str, n: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
