@@ -131,8 +131,31 @@ def test_mixture_of_priors_and_graph_function_types_generate():
 
     assert graph_prior_config(None) is None
     assert graph_prior_config("default,tree,prod").fct_types == "default,tree,prod"
+    filtered = graph_prior_config(filter_graphs=True, filter_datasets=True)
+    assert filtered.fct_types == "default"
+    assert filtered.filter_unpredictable_graphs and filtered.filter_unpredictable_datasets
     loader = _small_loader(prior_type="graph_scm+tree_scm", graph_fct_types="tree,prod", batch_size_per_gp=1)
     batches = list(loader)
     assert len(batches) == 4 and len(loader.pd) == 2
     assert loader.pd[0].prior.config.fct_types == "tree,prod"
+    assert len(list(_small_loader(graph_filter_graphs=True, graph_filter_datasets=True))) == 4
     assert loader._kwargs["batch_size_per_gp"] == 1
+
+
+def _firsts(loader, epochs=1):
+    return [[b["x"][0, 0, 0].item() for b in loader] for _ in range(epochs)]
+
+
+@pytest.mark.parametrize("workers", [0, 2])
+def test_seeded_loader_gives_the_same_tables_and_new_ones_each_epoch(workers):
+    """Same seed and workers: the same tables, epoch by epoch. Another seed: other tables. Each epoch differs
+    from the previous one. A loader told that 1 epoch is done starts with the second epoch's tables (resume)."""
+    pytest.importorskip("tabicl")
+    a = _firsts(_small_loader(num_steps=4, num_workers=workers, seed=7), epochs=2)
+    b = _firsts(_small_loader(num_steps=4, num_workers=workers, seed=7), epochs=2)
+    other = _firsts(_small_loader(num_steps=4, num_workers=workers, seed=8))
+    resumed = _firsts(_small_loader(num_steps=4, num_workers=workers, seed=7, epoch=1))
+    assert a == b
+    assert a[0] != a[1]
+    assert other[0] != a[0]
+    assert resumed[0] == a[1]

@@ -72,6 +72,8 @@ a next version.
    run once, on the final model of this research, and reported with the first model.
 2. Runs are compared at an equal number of tables trained on (from `steps.csv`), not epochs.
 3. Every run keeps its launch command and commit (`args_<time>.json`).
+4. The runs of the final recipe use `--seed` (initial weights and the prior's tables; the same seed and number
+   of workers give the same tables), so they can be reproduced and a twin can see exactly the same data.
 
 ## Plan
 
@@ -126,3 +128,50 @@ widening.
 
 **Targets for the final model** (validation only): XOR-3 with 1000 rows >= 0.90, XOR-2 with 300 rows >= 0.98,
 linear with 480 noise features >= 0.95, and held-out loss no worse than w5000 epoch 100 on any set.
+
+## Later: interpretability, then a weight-sparse twin
+
+Decided on 2026-10-08: interpretability is studied on the good model, not before (interpreting a weak model
+mostly describes its weaknesses). Order:
+1. Attribution (feature attention) against known ground truth (synthetic probes) and PAM50 on Shamir breast.
+2. Mechanistic analysis of the dense model: sparse autoencoders, circuits by pruning and head ablation on the
+   synthetic tasks.
+3. A weight-sparse twin (as in Gao et al. 2025, "Understanding neural networks through sparse circuits"):
+   the final recipe, seed, workers and tables unchanged, only the weights constrained to be sparse, at 2-3
+   levels of sparsity, to measure what capability is lost and compare how interpretable each one is.
+
+## The recipe of the second model (fixed 2026-10-08, before its runs)
+
+Decided on everything above instead of the screening of step 2, which is replaced by this single recipe
+trained from scratch (a clean, reproducible training for the paper), with one comparison at its start.
+
+What each choice rests on:
+- **Batch 64.** At batch 8 about 90% of the squared gradient norm was noise (gradient norm 1.7-2.0 at batch 8
+  against 0.74-1.04 at batch 64 in T1-T3), which puts the critical batch near 90 tables; going from 8 to 32 at
+  epoch 101 dropped the loss by 0.01 at once. TabICLv2 also trains with 64.
+- **Rows 40-1024, uniform.** Our loss gap to TabICL v2 (same prior) grows with the context: none at ~70
+  rows, 0.05-0.07 at ~210, 0.07-0.08 at ~700; with 1000 training rows TabPFN, TabICL v2, RF and XGBoost solve
+  XOR-3 and we do not. TabICL v2 solves madelon (0.964) with this prior. TabICLv2 trains on 1024 rows; uniform
+  40-1024 keeps small tables (our use) in the mix.
+- **Clipping at 10** (TabICLv2 raised it from 1 to 10): at batch 8, norm 1 clipped 84-96% of the steps.
+- **Prior: graph_scm with TabICL's defaults**, features 2-100 (TabICLv2's prior and feature range). Graphs
+  whose labels depend on no feature are resampled (`--filter-graphs`; measured to change little, kept as
+  TabICLv2 does).
+- **Parallel generation and a seed** (`--workers`, `--seed 42`): ~5x the tables per hour; reproducible.
+- **Several GPUs per run** (`--multi-gpu`): tables of up to 1024 rows cost the GPU several times more.
+- Unchanged: schedule-free AdamW, lr 1e-4 (T3's setting), warmup 500 steps, missing values up to 10%,
+  12 layers, embedding 192 (7.3M parameters).
+
+**The comparison at the start: the dataset filter.** TabICLv2 drops tables an ExtraTrees cannot predict
+better than a constant. Measured on our prior: 51% of the tables at 40-300 rows, 36% at 40-1024. Dropping
+them should remove useless gradient noise, but with few rows it also drops tables with a real, weak signal,
+and a model that never sees "no detectable signal" may claim signal in small, noisy omics cohorts. Two runs,
+identical but for `--filter-datasets`, start together (4 GPUs each). At 20 epochs (640k tables) the one with the
+lower mean held-out loss over graph_r100, graph_r300 and graph_r1000 (validation tables are not filtered, so
+weak-signal tables count) continues; the other stops and is reported as the ablation. A tie (difference under
+0.005) goes to the run without the filter (simpler, no calibration risk).
+
+**Stages after this one** are decided on the fixed validation when it ends: a short stage with larger tables
+(as TabICLv2's stages 2-3) if graph_r1000 still trails TabICL v2, then the widening, followed from its first
+snapshot so the base's held-out loss and XOR probes do not fall. The paper benchmarks are run once, at the
+end, with every model run by us on the same folds (published numbers only as a check).

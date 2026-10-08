@@ -24,6 +24,8 @@ parser.add_argument("--min-features", type=int, default=2)
 parser.add_argument("--max-features", type=int, default=100)
 parser.add_argument("--steps", type=int, default=40, help="batches timed per setting")
 parser.add_argument("--graph-fct-types", default=None)
+parser.add_argument("--filter-graphs", action="store_true")
+parser.add_argument("--filter-datasets", action="store_true")
 args = parser.parse_args()
 
 for workers in args.workers:
@@ -32,7 +34,8 @@ for workers in args.workers:
         num_datapoints_max=args.max_rows, min_features=args.min_features, max_features=args.max_features,
         max_num_classes=10, device=torch.device("cpu"), prior_type=args.prior_type, log_seq_len=True,
         min_train_size=0.3, max_train_size=0.9, num_workers=0 if workers == 1 else workers,
-        graph_fct_types=args.graph_fct_types,
+        graph_fct_types=args.graph_fct_types, graph_filter_graphs=args.filter_graphs,
+        graph_filter_datasets=args.filter_datasets,
     )
     iterator = iter(loader)
     next(iterator)  # workers started and warm
