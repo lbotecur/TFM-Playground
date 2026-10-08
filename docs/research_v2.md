@@ -175,3 +175,18 @@ weak-signal tables count) continues; the other stops and is reported as the abla
 (as TabICLv2's stages 2-3) if graph_r1000 still trails TabICL v2, then the widening, followed from its first
 snapshot so the base's held-out loss and XOR probes do not fall. The paper benchmarks are run once, at the
 end, with every model run by us on the same folds (published numbers only as a check).
+
+### Update before launch (2026-10-08, 13:30): the start compares the learning rate too
+
+T1-T3 at 20 epochs (160k tables from base epoch 100), mean held-out loss over graph_r100/r300/r1000: T1
+(lr 1e-4, batch 8, the old recipe) 0.8485, no better than its start (0.8481); T2 (lr 3e-5, batch 8) 0.8452;
+T3 (lr 1e-4, batch 64) 0.8479. Lowering the gradient noise helps (the old recipe sat at a noise floor), and at
+batch 64 a learning rate of 1e-4 is likely too small: T3 takes 8x fewer steps of the same size as T1. Scaling
+rules put batch 64 between 1e-4 and 3e-4. So the start is a 2x2, learning rate {1e-4, 3e-4} by dataset filter
+{off, on}, 2 GPUs per run, same seed (the two runs without the filter see the same tables). At 40 epochs (640k
+tables) the run with the lowest mean held-out loss over graph_r100/r300/r1000 continues; a difference under
+0.005 is a tie, broken toward no filter and then toward the lower learning rate. The XOR probes vary by up
+to 0.07 between consecutive snapshots of a run (5 seeds), so they explain, they do not decide.
+
+Smoke test (2 GPUs, batch 16 x accumulation 4, rows 40-1024, 7 workers): 17 tables/s with no waiting for the
+prior, so 640k tables take about 10 hours per run.
