@@ -50,6 +50,7 @@ def train(
     snapshot_every: int = 0,
     log_every: int = 0,
     step_log_path: str | None = None,
+    grad_clip: float = 1.0,
 ):
     """
     Trains our model on the given prior using the given criterion.
@@ -78,8 +79,9 @@ def train(
         step_log_path: (str, optional) CSV to append a row to every log_every batches: epoch, batch, tables
             trained on so far in the run (from this launch), mean loss of the window, seconds spent waiting
             for the prior in the window, seconds since the epoch started, mean gradient norm before clipping
-            and the fraction of optimizer steps clipped (norm > 1). Waiting time near the window's time means
+            and the fraction of optimizer steps clipped (norm > grad_clip). Waiting time near the window's time means
             the prior, not the GPU, limits training.
+        grad_clip: (float) maximum gradient norm (clip_grad_norm_); 1.0 in all runs before 2026-10.
 
     Returns:
         (torch.Tensor) a tensor of shape (num_rows, batch_size, num_features, embedding_size)
@@ -200,7 +202,7 @@ def train(
                         norms = torch.tensor(window_norms or [float("nan")])
                         step_log.write(f"{epoch},{num_batches},{tables_seen},{window_loss / log_every:.5f},"
                                        f"{window_wait:.2f},{elapsed:.1f},{norms.mean():.4f},"
-                                       f"{(norms > 1.0).float().mean():.3f}\n")
+                                       f"{(norms > grad_clip).float().mean():.3f}\n")
                         step_log.flush()
                     window_loss = 0.0
                     window_wait = 0.0
@@ -211,7 +213,7 @@ def train(
                 if num_batches % accumulate_gradients == 0:
                     # The norm before clipping is logged: if most steps are clipped, the update size is set
                     # by the clipping, not by the learning rate.
-                    window_norms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item())
+                    window_norms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item())
                     optimizer.step()
                     optimizer.zero_grad()
 

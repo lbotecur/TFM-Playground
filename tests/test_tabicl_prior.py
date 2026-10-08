@@ -131,10 +131,14 @@ def test_mixture_of_priors_and_graph_function_types_generate():
 
     assert graph_prior_config(None) is None
     assert graph_prior_config("default,tree,prod").fct_types == "default,tree,prod"
+    filtered = graph_prior_config(filter_graphs=True, filter_datasets=True)
+    assert filtered.fct_types == "default"
+    assert filtered.filter_unpredictable_graphs and filtered.filter_unpredictable_datasets
     loader = _small_loader(prior_type="graph_scm+tree_scm", graph_fct_types="tree,prod", batch_size_per_gp=1)
     batches = list(loader)
     assert len(batches) == 4 and len(loader.pd) == 2
     assert loader.pd[0].prior.config.fct_types == "tree,prod"
+    assert len(list(_small_loader(graph_filter_graphs=True, graph_filter_datasets=True))) == 4
     assert loader._kwargs["batch_size_per_gp"] == 1
 
 

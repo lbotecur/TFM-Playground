@@ -282,3 +282,29 @@ def test_train_writes_step_log(tmp_path, monkeypatch):
     assert [line.split(",")[:3] for line in lines[1:]] == [["1", "2", "4"], ["1", "4", "8"]]
     grad_norm, clipped = map(float, lines[1].split(",")[6:])
     assert grad_norm > 0 and 0 <= clipped <= 1
+
+
+def test_train_grad_clip_sets_the_clipping_threshold(tmp_path, monkeypatch):
+    """With a huge threshold no step is clipped; with a tiny one every step is."""
+    monkeypatch.chdir(tmp_path)
+    for clip, expected in ((1e6, 0.0), (1e-6, 1.0)):
+        x = torch.randn(2, 6, 3)
+        y = torch.randint(0, 3, (2, 6)).float()
+        path = tmp_path / f"steps_{clip}.csv"
+        train(_tiny_model(), _MockPrior([_batch(x, y, y.clone(), tts=4)] * 2), nn.CrossEntropyLoss(), epochs=1,
+              device=torch.device("cpu"), run_name="run", log_every=2, step_log_path=str(path), grad_clip=clip)
+        assert float(path.read_text().strip().splitlines()[1].split(",")[7]) == expected
+
+
+def test_train_multi_gpu_saves_plain_state_dict(tmp_path, monkeypatch):
+    """With multi_gpu (nn.DataParallel; on a machine without GPUs it just runs the module) the checkpoint holds
+    the model's own state dict, loadable without the DataParallel 'module.' prefix."""
+    monkeypatch.chdir(tmp_path)
+    x = torch.randn(2, 6, 3)
+    y = torch.randint(0, 3, (2, 6)).float()
+    model = _tiny_model()
+    train(model, _MockPrior([_batch(x, y, y.clone(), tts=4)]), nn.CrossEntropyLoss(), epochs=1,
+          device=torch.device("cpu"), run_name="run", multi_gpu=True)
+    state = torch.load(tmp_path / "workdir/run/latest_checkpoint.pth", weights_only=False)["model"]
+    assert not any(k.startswith("module.") for k in state)
+    _tiny_model().load_state_dict(state)

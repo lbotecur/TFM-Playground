@@ -8,16 +8,21 @@ from tabicl.prior import PriorDataset as TabICLPriorDataset
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 
-def graph_prior_config(fct_types: str | None):
-    """PriorConfig of graph_scm with the given random function types, or None for TabICL's defaults.
-    fct_types is a comma-separated list of 'mlp', 'tree', 'disc', 'lin', 'quad', 'gp', 'em', 'prod' or the
-    presets 'default' (all eight) and 'tabpfnv2'; a type listed twice is sampled twice as often, e.g.
-    'default,tree,prod,quad' doubles the weight of trees, products and quadratic functions."""
-    if not fct_types:
+def graph_prior_config(fct_types: str | None = None, filter_graphs: bool = False, filter_datasets: bool = False):
+    """PriorConfig of graph_scm, or None for TabICL's defaults (what all runs before 2026-10 used).
+    fct_types: comma-separated random function types, 'mlp', 'tree', 'disc', 'lin', 'quad', 'gp', 'em', 'prod' or
+    the presets 'default' (all eight) and 'tabpfnv2'; a type listed twice is sampled twice as often, e.g.
+    'default,tree,prod,quad' doubles the weight of trees, products and quadratic functions.
+    filter_graphs: resample graphs in which the target shares no ancestor with any feature (labels independent
+    of the features, pure noise). filter_datasets: resample tables in which an ExtraTrees does not beat the
+    constant prediction (bootstrap p >= 0.05); with few rows this also drops tables with a weak real signal.
+    TabICLv2 used both filters (about 35% of its 1024-row tables were dropped)."""
+    if not (fct_types or filter_graphs or filter_datasets):
         return None
     from tabicl.prior.graph_lib._config import PriorConfig
 
-    return PriorConfig(fct_types=fct_types)
+    return PriorConfig(fct_types=fct_types or "default", filter_unpredictable_graphs=filter_graphs,
+                       filter_unpredictable_datasets=filter_datasets)
 
 
 def parse_prior_types(prior_type: str, weights: list[float] | None = None) -> tuple[list[str], list[float]]:
@@ -81,6 +86,8 @@ class TabICLPriorDataLoader(DataLoader):
         batch_size_per_gp: int | None = None,
         prior_weights: list[float] | None = None,
         graph_fct_types: str | None = None,
+        graph_filter_graphs: bool = False,
+        graph_filter_datasets: bool = False,
         seed: int | None = None,
         epoch: int = 0,
     ):
@@ -90,7 +97,7 @@ class TabICLPriorDataLoader(DataLoader):
         Generating the tables on the CPU is what limits training speed, so give it the cores available.
         batch_size_per_gp: datasets per group of the batch; a group shares the prior's sampled
         hyperparameters. None = the whole batch is one group (what all runs before 2026-10 used).
-        graph_fct_types: random function types of graph_scm (see graph_prior_config); None = defaults.
+        graph_fct_types, graph_filter_graphs, graph_filter_datasets: graph_scm settings (see graph_prior_config).
         seed: makes the tables reproducible: the same seed, number of workers and settings give the same tables
         in every epoch. None = random (all runs before 2026-10). epoch: epochs already done (for a resumed
         run, so it continues the sequence instead of repeating its first epochs)."""
@@ -118,7 +125,7 @@ class TabICLPriorDataLoader(DataLoader):
             max_train_size=max_train_size,
             n_jobs=1,
         )
-        self.graph_fct_types = graph_fct_types
+        self.graph_config = (graph_fct_types, graph_filter_graphs, graph_filter_datasets)
         self.seed = seed
         self.epoch = epoch  # incremented at the start of every epoch (iteration over the loader)
         self._priors = None  # built on first use, in the process (or worker) that generates
@@ -136,7 +143,7 @@ class TabICLPriorDataLoader(DataLoader):
         if self._priors is None:
             self._priors = [
                 TabICLPriorDataset(
-                    prior_type=t, config=graph_prior_config(self.graph_fct_types) if t == "graph_scm" else None,
+                    prior_type=t, config=graph_prior_config(*self.graph_config) if t == "graph_scm" else None,
                     **self._kwargs,
                 )
                 for t in self.prior_types

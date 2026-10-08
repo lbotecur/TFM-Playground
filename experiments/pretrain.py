@@ -63,6 +63,14 @@ parser.add_argument("--graph-fct-types", default=None,
 parser.add_argument("--seed", type=int, default=None,
                     help="seed of the model's initial weights and of the prior's tables (same seed, workers and "
                          "settings = same tables); default random, as all runs before 2026-10")
+parser.add_argument("--filter-graphs", action="store_true",
+                    help="graph_scm: resample graphs whose labels do not depend on any feature (as TabICLv2)")
+parser.add_argument("--filter-datasets", action="store_true",
+                    help="graph_scm: resample tables an ExtraTrees cannot predict better than a constant (as TabICLv2)")
+parser.add_argument("--clip", type=float, default=1.0, help="maximum gradient norm (1.0 in all earlier runs)")
+parser.add_argument("--multi-gpu", action="store_true",
+                    help="split each batch over every visible GPU (nn.DataParallel); choose them with "
+                         "CUDA_VISIBLE_DEVICES and leave --gpu at 0. Each GPU gets batch-size / GPUs tables")
 parser.add_argument("--no-log-seq-len", action="store_true",
                     help="rows per table uniform in [min-rows, max-rows] instead of log-uniform")
 args = parser.parse_args()
@@ -120,6 +128,8 @@ else:
         batch_size_per_gp=args.batch_size_per_gp,
         prior_weights=args.prior_weights,
         graph_fct_types=args.graph_fct_types,
+        graph_filter_graphs=args.filter_graphs,
+        graph_filter_datasets=args.filter_datasets,
         seed=args.seed,
     )
 
@@ -172,5 +182,7 @@ trained_model, loss = train(
     snapshot_every=5,
     log_every=50,
     step_log_path=str(run_dir / "steps.csv"),
+    grad_clip=args.clip,
+    multi_gpu=args.multi_gpu,
 )
 print(f"Done. Checkpoint: workdir/{args.run_name}/latest_checkpoint.pth")
