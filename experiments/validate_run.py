@@ -24,8 +24,8 @@ import torch
 
 from tfmplayground.benchmarks.models import is_checkpoint
 from tfmplayground.interface import init_model_from_state_dict_file
-from tfmplayground.validation import (PRIOR_SETS, PROBES, load_prior_sets, prior_metrics, prior_metrics_classifier,
-                                     probe_name, run_probes)
+from tfmplayground.validation import (DEV_DATASETS, PRIOR_SETS, PROBES, load_prior_sets, prior_metrics,
+                                     prior_metrics_classifier, probe_name, run_dev, run_probes)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--runs", nargs="*", default=[], help="run directories: every epoch_*.pth in them")
@@ -38,6 +38,9 @@ parser.add_argument("--prior-tables", type=int, default=200, help="held-out tabl
 parser.add_argument("--seeds", type=int, default=5, help="seeds per probe")
 parser.add_argument("--skip-prior", action="store_true")
 parser.add_argument("--skip-probes", action="store_true")
+parser.add_argument("--skip-dev", action="store_true", help="skip the development datasets")
+parser.add_argument("--data-root", default=str(Path(__file__).resolve().parents[2]),
+                    help="folder that contains HDLSS_dev (default: the repo's parent, as the benchmarks)")
 parser.add_argument("--build-only", action="store_true", help="only build the held-out prior tables")
 parser.add_argument("--reference", type=int, default=0,
                     help="also the held-out loss through each model's classifier interface on the first N tables "
@@ -108,6 +111,10 @@ def evaluate(name: str, done: set):
             rows += [{**base, "kind": "prior_ref", "set": key, "seed": 0, "metric": k, "value": v}
                      for k, v in metrics.items()]
         save(rows)
+    if not args.skip_dev:
+        todo = [d for d in DEV_DATASETS if (name, f"dev_{d}", 0) not in done]
+        if todo:
+            save([{**base, "kind": "dev", **r} for r in run_dev(name, device, args.data_root, todo)])
     if not args.skip_probes:
         todo = [p for p in PROBES if any((name, probe_name(*p), s) not in done for s in range(args.seeds))]
         if todo:
@@ -131,6 +138,11 @@ def summary():
     if len(ref):
         print("\nHeld-out prior loss through the classifier interface, first tables of each set (lower is better)\n")
         print(ref[[f"ref_{s}" for s in PRIOR_SETS if f"ref_{s}" in ref.columns]].round(4).to_string())
+    dev = df[(df.kind == "dev") & (df.metric == "roc_auc")].pivot_table(index="model", columns="set", values="value")
+    if len(dev):
+        dev["mean"] = dev.mean(axis=1)
+        print("\nDevelopment datasets, AUROC (mean over folds)\n")
+        print(dev[[f"dev_{d}" for d in DEV_DATASETS if f"dev_{d}" in dev.columns] + ["mean"]].round(3).to_string())
     if len(probes):
         print("\nProbe AUROC, mean over seeds\n")
         print(probes[[probe_name(*p) for p in PROBES if probe_name(*p) in probes.columns]].round(3).to_string())
