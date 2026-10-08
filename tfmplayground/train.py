@@ -49,6 +49,7 @@ def train(
     warmup_steps: int = 0,
     snapshot_every: int = 0,
     log_every: int = 0,
+    step_log_path: str | None = None,
 ):
     """
     Trains our model on the given prior using the given criterion.
@@ -73,7 +74,11 @@ def train(
         amp_dtype: (torch.dtype, optional) if set (e.g. torch.bfloat16), runs the forward pass under
             torch.autocast with this dtype. Weights and optimizer state stay in fp32. None disables it.
         warmup_steps: (int) number of optimizer steps of linear learning-rate warmup, from ~0 up to lr.
-            Counted in optimizer steps, i.e. batches / accumulate_gradients. 0 disables it.        
+            Counted in optimizer steps, i.e. batches / accumulate_gradients. 0 disables it.
+        step_log_path: (str, optional) CSV to append a row to every log_every batches: epoch, batch, tables
+            trained on so far in the run (from this launch), mean loss of the window, seconds spent waiting
+            for the prior in the window and seconds since the epoch started. Waiting time near the window's
+            time means the prior, not the GPU, limits training.
 
     Returns:
         (torch.Tensor) a tensor of shape (num_rows, batch_size, num_features, embedding_size)
@@ -98,6 +103,13 @@ def train(
     assert prior.num_steps % accumulate_gradients == 0, "num_steps must be divisible by accumulate_gradients"
 
     mean_loss = float("nan")
+    step_log = None
+    if step_log_path:
+        new_file = not os.path.exists(step_log_path)
+        step_log = open(step_log_path, "a")
+        if new_file:
+            step_log.write("epoch,batch,tables,loss,data_wait_s,seconds\n")
+    tables_seen = 0
     try:
         for epoch in range(ckpt["epoch"] + 1 if ckpt else 1, epochs + 1):
             epoch_start_time = time.time()
@@ -107,7 +119,14 @@ def train(
             num_batches = 0  # batches actually trained on (batches with NaN targets are skipped)
             window_loss = 0.0  # summed loss since the last step log (see log_every)
             optimizer.zero_grad()  # do not carry a partial accumulation over from the previous epoch
-            for i, full_data in enumerate(prior):
+            window_wait = 0.0  # seconds spent waiting for the prior since the last step log
+            batches = iter(prior)
+            while True:
+                fetch_start = time.time()
+                full_data = next(batches, None)
+                if full_data is None:
+                    break
+                window_wait += time.time() - fetch_start
                 train_test_split_index = full_data["train_test_split_index"]
                 x = full_data["x"].to(device)
                 # Feature widening (HDLSS prior): per batch, sample how many features to add and
@@ -166,14 +185,21 @@ def train(
                 loss.backward()
                 total_loss += loss.cpu().detach().item() * accumulate_gradients
                 num_batches += 1
+                tables_seen += x.shape[0]
                 window_loss += loss.cpu().detach().item() * accumulate_gradients
                 if log_every and num_batches % log_every == 0:
+                    elapsed = time.time() - epoch_start_time
                     print(
                         f"epoch {epoch} | batch {num_batches}/{len(prior)} | "
-                        f"loss {window_loss / log_every:.4f} | {time.time() - epoch_start_time:.0f}s",
+                        f"loss {window_loss / log_every:.4f} | {elapsed:.0f}s | data wait {window_wait:.0f}s",
                         flush=True,
                     )
+                    if step_log:
+                        step_log.write(f"{epoch},{num_batches},{tables_seen},{window_loss / log_every:.5f},"
+                                       f"{window_wait:.2f},{elapsed:.1f}\n")
+                        step_log.flush()
                     window_loss = 0.0
+                    window_wait = 0.0
 
                 # Step on trained batches, not on the loop index: a skipped batch must not shift
                 # the accumulation groups.
@@ -219,6 +245,8 @@ def train(
     except KeyboardInterrupt:
         pass
     finally:
+        if step_log:
+            step_log.close()
         for callback in callbacks:
             callback.close()
 

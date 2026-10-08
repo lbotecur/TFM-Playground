@@ -51,6 +51,17 @@ parser.add_argument("--prob-no-widening", type=float, default=0.3)
 parser.add_argument("--missing-rate-max", type=float, default=0.1)
 parser.add_argument("--resume", action="store_true")  # continúa este run desde su latest_checkpoint.pth
 parser.add_argument("--init-from", default=None)  # pesos iniciales de otro checkpoint (continued pretraining)
+# Generation of the TabICL priors' tables (graph_scm, tree_scm, ...; not omics):
+parser.add_argument("--workers", type=int, default=0,
+                    help="processes generating tables in parallel; 0 = one, in the training process (runs before 2026-10)")
+parser.add_argument("--batch-size-per-gp", type=int, default=None,
+                    help="tables per group sharing the prior's hyperparameters; default = the whole batch")
+parser.add_argument("--prior-weights", type=float, nargs="+", default=None,
+                    help="with --prior-type a+b: probability of each prior per batch (default equal)")
+parser.add_argument("--graph-fct-types", default=None,
+                    help="graph_scm random function types, e.g. 'default,tree,prod,quad' (default: TabICL's)")
+parser.add_argument("--no-log-seq-len", action="store_true",
+                    help="rows per table uniform in [min-rows, max-rows] instead of log-uniform")
 args = parser.parse_args()
 if args.prior_type == "omics":
     args.add_features_max = 0  # el prior ómico ya ensancha; train() no vuelve a ensanchar
@@ -99,9 +110,13 @@ else:
         max_num_classes=MAX_CLASSES,
         device=device,
         prior_type=args.prior_type,
-        log_seq_len=True,
+        log_seq_len=not args.no_log_seq_len,
         min_train_size=0.3,
         max_train_size=0.9,
+        num_workers=args.workers,
+        batch_size_per_gp=args.batch_size_per_gp,
+        prior_weights=args.prior_weights,
+        graph_fct_types=args.graph_fct_types,
     )
 
 model = NanoTabPFNModel(
@@ -148,5 +163,6 @@ trained_model, loss = train(
     warmup_steps=500,
     snapshot_every=5,
     log_every=50,
+    step_log_path=str(run_dir / "steps.csv"),
 )
 print(f"Done. Checkpoint: workdir/{args.run_name}/latest_checkpoint.pth")

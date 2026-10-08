@@ -92,3 +92,47 @@ def test_loader_keeps_features_of_the_widest_dataset():
     out = next(iter(_loader_with_batches([batch])))
 
     assert out["x"].shape == (2, 10, 7)
+
+
+def _small_loader(**kwargs):
+    from tfmplayground.external_priors import TabICLPriorDataLoader
+
+    defaults = dict(num_steps=4, batch_size=2, num_datapoints_min=30, num_datapoints_max=40, min_features=3,
+                    max_features=6, max_num_classes=3, device=torch.device("cpu"), prior_type="graph_scm")
+    return TabICLPriorDataLoader(**{**defaults, **kwargs})
+
+
+def test_loader_with_workers_yields_num_steps_different_batches():
+    """With workers, an epoch still has exactly num_steps batches (split among the workers), on the CPU, and
+    the workers do not repeat each other's tables (each is seeded differently)."""
+    pytest.importorskip("tabicl")
+    loader = _small_loader(num_steps=5, num_workers=2)
+    for _ in range(2):  # persistent workers: a second epoch works too
+        batches = list(loader)
+        assert len(batches) == 5
+        assert all(b["x"].device.type == "cpu" for b in batches)
+    firsts = [b["x"][0, 0, 0].item() for b in batches]
+    assert len(set(firsts)) == len(firsts)
+
+
+def test_parse_prior_types_normalizes_weights_and_rejects_mismatch():
+    from tfmplayground.external_priors.tabicl import parse_prior_types
+
+    assert parse_prior_types("graph_scm") == (["graph_scm"], [1.0])
+    assert parse_prior_types("graph_scm+tree_scm", [3, 1]) == (["graph_scm", "tree_scm"], [0.75, 0.25])
+    with pytest.raises(ValueError):
+        parse_prior_types("graph_scm+tree_scm", [1.0])
+
+
+def test_mixture_of_priors_and_graph_function_types_generate():
+    """A '+' mixture builds one TabICL prior per type, and graph_fct_types reaches graph_scm's PriorConfig."""
+    pytest.importorskip("tabicl")
+    from tfmplayground.external_priors.tabicl import graph_prior_config
+
+    assert graph_prior_config(None) is None
+    assert graph_prior_config("default,tree,prod").fct_types == "default,tree,prod"
+    loader = _small_loader(prior_type="graph_scm+tree_scm", graph_fct_types="tree,prod", batch_size_per_gp=1)
+    batches = list(loader)
+    assert len(batches) == 4 and len(loader.pd) == 2
+    assert loader.pd[0].prior.config.fct_types == "tree,prod"
+    assert loader._kwargs["batch_size_per_gp"] == 1
