@@ -261,3 +261,22 @@ def test_train_logs_every_n_batches(tmp_path, monkeypatch, capsys):
     lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("epoch 1 | batch")]
     assert len(lines) == 2
     assert "batch 2/4" in lines[0] and "batch 4/4" in lines[1]
+
+
+def test_train_writes_step_log(tmp_path, monkeypatch):
+    """step_log_path gets a header and one row per log_every batches, counting the tables trained on."""
+    monkeypatch.chdir(tmp_path)
+    model = _tiny_model()
+    batches = []
+    for _ in range(4):
+        x = torch.randn(2, 6, 3)
+        y = torch.randint(0, 3, (2, 6)).float()
+        batches.append(_batch(x, y, y.clone(), tts=4))
+    path = tmp_path / "steps.csv"
+
+    train(model, _MockPrior(batches), nn.CrossEntropyLoss(), epochs=1, device=torch.device("cpu"),
+          run_name="run", log_every=2, step_log_path=str(path))
+
+    lines = path.read_text().strip().splitlines()
+    assert lines[0] == "epoch,batch,tables,loss,data_wait_s,seconds"
+    assert [line.split(",")[:3] for line in lines[1:]] == [["1", "2", "4"], ["1", "4", "8"]]
