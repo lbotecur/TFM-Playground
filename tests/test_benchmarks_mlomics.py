@@ -173,9 +173,27 @@ def test_without_low_memory_our_checkpoints_use_auto_and_keep_their_label(tmp_pa
         return real("random_forest", "cpu")
 
     monkeypatch.setattr(runner, "make_model", spy)
-    res = runner.run_benchmark(["mlomics/BRCA/mrna"], ["ckpt.pth"], tmp_path / "r.csv", tmp_path, device="cpu")
+    res = runner.run_benchmark(["mlomics/BRCA/mrna"], ["ckpt.pth"], tmp_path / "r.csv", tmp_path, device="cpu",
+                               low_memory=False)
     assert set(res.model) == {"ckpt.pth"}
     assert set(seen) == {("ckpt.pth", "auto")}
+
+
+def test_low_memory_is_the_default_of_the_runner(tmp_path, monkeypatch):
+    from tfmplayground.benchmarks import runner
+
+    _fake_mlomics(tmp_path / mlomics.FOLDER)
+    seen = []
+    real = runner.make_model
+
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None):
+        seen.append((name, low_memory))
+        return real("random_forest", "cpu")
+
+    monkeypatch.setattr(runner, "make_model", spy)
+    res = runner.run_benchmark(["mlomics/BRCA/mrna"], ["ckpt.pth"], tmp_path / "r.csv", tmp_path, device="cpu")
+    assert set(res.model) == {"ckpt.pth [low-memory]"}
+    assert set(seen) == {("ckpt.pth", True)}
 
 
 def test_feature_clip_label_and_value_only_for_our_checkpoints(tmp_path, monkeypatch):

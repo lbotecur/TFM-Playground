@@ -29,7 +29,7 @@ from torch import nn
 from tfmplayground.callbacks import ConsoleLoggerCallback
 from tfmplayground.external_priors import TabICLPriorDataLoader
 from tfmplayground.interface import _migrate_state_dict
-from tfmplayground.models.nanotabpfn import NanoTabPFNModel
+from tfmplayground.models.nanotabpfn import DEFAULT_FEATURE_CLIP, LEGACY_FEATURE_CLIP, NanoTabPFNModel
 from tfmplayground.priors.omics import OmicsPriorConfig
 from tfmplayground.priors.omics_loader import OmicsPriorDataLoader
 from tfmplayground.train import WideningConfig, train
@@ -68,8 +68,9 @@ parser.add_argument("--filter-graphs", action="store_true",
 parser.add_argument("--filter-datasets", action="store_true",
                     help="graph_scm: resample tables an ExtraTrees cannot predict better than a constant (as TabICLv2)")
 parser.add_argument("--clip", type=float, default=1.0, help="maximum gradient norm (1.0 in all earlier runs)")
-parser.add_argument("--feature-clip", type=float, default=100.0,
-                    help="bound of the normalized features (100 in all earlier runs), saved in the checkpoint")
+parser.add_argument("--feature-clip", type=float, default=None,
+                    help="bound of the normalized features, saved in the checkpoint. Default: 10 for a new run (100 in "
+                         "all runs before v2); a resumed run keeps the one it was trained with")
 parser.add_argument("--multi-gpu", action="store_true",
                     help="split each batch over every visible GPU (nn.DataParallel); choose them with "
                          "CUDA_VISIBLE_DEVICES and leave --gpu at 0. Each GPU gets batch-size / GPUs tables")
@@ -143,7 +144,6 @@ model = NanoTabPFNModel(
     mlp_hidden_size=768,
     num_layers=12,
     num_outputs=MAX_CLASSES,
-    feature_clip=args.feature_clip,
 ).to(device)
 model.gradient_checkpointing = True
 
@@ -156,6 +156,17 @@ if args.resume:
 elif args.init_from:
     state = torch.load(args.init_from, map_location=device, weights_only=False)
     model.load_state_dict(_migrate_state_dict(state["model"]))
+
+# Feature clip (saved in every checkpoint): the flag if given, else the resumed run's own (100 for runs started
+# before v2, whose checkpoints do not record it), else the default for a new run, including --init-from (10).
+if args.feature_clip is not None:
+    feature_clip = args.feature_clip
+elif ckpt is not None:
+    feature_clip = ckpt["architecture"].get("feature_clip", LEGACY_FEATURE_CLIP)
+else:
+    feature_clip = DEFAULT_FEATURE_CLIP
+model.feature_encoder.clip = float(feature_clip)
+print(f"feature clip: {feature_clip:g}", flush=True)
 
 widening = WideningConfig(
     add_features_min=200,

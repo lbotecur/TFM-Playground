@@ -10,6 +10,10 @@ from torch.utils.checkpoint import checkpoint
 
 # Fixed seed of the per-column random vectors (see NanoTabPFNModel.add_column_embeddings).
 COLUMN_EMBEDDING_SEED = 42
+# Bound of the normalized features (see normalize_features). 10 from v2 on; checkpoints saved before the clip was
+# configurable (base, w5000, ...) were trained and evaluated with LEGACY_FEATURE_CLIP and keep it when loaded.
+DEFAULT_FEATURE_CLIP = 10.0
+LEGACY_FEATURE_CLIP = 100.0
 
 
 class NanoTabPFNModel(nn.Module):
@@ -20,7 +24,7 @@ class NanoTabPFNModel(nn.Module):
         mlp_hidden_size: int,
         num_layers: int,
         num_outputs: int,
-        feature_clip: float = 100.0,
+        feature_clip: float = DEFAULT_FEATURE_CLIP,
     ):
         """Initializes the feature/target encoder, transformer blocks and decoder. feature_clip: normalized
         feature values are clipped to [-feature_clip, feature_clip] (see normalize_features); it is not a
@@ -150,15 +154,18 @@ class NanoTabPFNModel(nn.Module):
         return output
 
 
-def normalize_features(x: torch.Tensor, train_test_split_index: int, clip: float = 100.0) -> torch.Tensor:
+def normalize_features(
+    x: torch.Tensor, train_test_split_index: int, clip: float = DEFAULT_FEATURE_CLIP
+) -> torch.Tensor:
     """
     Normalizes each feature based on the mean and std of the training rows (ignoring
     missing entries), imputes the missing entries and clips outliers to [-clip, clip].
-    The default 100 only guards against absurd values (a column constant in the training
-    rows has std ~ eps, so any other value in a test row becomes ~1e7). A smaller clip also
-    bounds the z-scores of rare values: a binary column whose ones are a fraction p of the
-    rows gives them z ~ sqrt((1 - p) / p), about 30 for p = 0.1%, which wide sparse tables
-    (bag-of-words text) have in almost every column and the prior almost never produces.
+    A clip of 100 (the original one, LEGACY_FEATURE_CLIP) only guards against absurd values
+    (a column constant in the training rows has std ~ eps, so any other value in a test row
+    becomes ~1e7). The default 10 also bounds the z-scores of rare values: a binary column
+    whose ones are a fraction p of the rows gives them z ~ sqrt((1 - p) / p), about 30 for
+    p = 0.1%, which wide sparse tables (bag-of-words text) have in almost every column and the
+    prior almost never produces. It changes 0.01-0.02% of the prior's values.
     Emits a per-cell missing indicator alongside the value, so the embedding sees
     "value + was-missing" as one unit per feature. This is the feature preprocessing,
     kept separate from the embedding so it can be reused and tested on its own.
@@ -191,7 +198,7 @@ def normalize_features(x: torch.Tensor, train_test_split_index: int, clip: float
     return torch.cat([x, indicator], dim=-1)
 
 class FeatureEncoder(nn.Module):
-    def __init__(self, embedding_size: int, clip: float = 100.0):
+    def __init__(self, embedding_size: int, clip: float = DEFAULT_FEATURE_CLIP):
         """Creates the linear layer that we will use to embed our features.
 
         Input width is 2 because normalize_features emits [value, missing_indicator]

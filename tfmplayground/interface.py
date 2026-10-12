@@ -11,7 +11,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 
-from tfmplayground.models.nanotabpfn import NanoTabPFNModel
+from tfmplayground.models.nanotabpfn import LEGACY_FEATURE_CLIP, NanoTabPFNModel
 from tfmplayground.normalization import (
     compute_target_stats_numpy,
     denormalize_predictions,
@@ -74,10 +74,25 @@ def init_model_from_state_dict_file(file_path):
         num_layers=state_dict["architecture"]["num_layers"],
         num_outputs=state_dict["architecture"]["num_outputs"],
         # checkpoints saved before the clip was configurable were all trained with 100
-        feature_clip=state_dict["architecture"].get("feature_clip", 100.0),
+        feature_clip=state_dict["architecture"].get("feature_clip", LEGACY_FEATURE_CLIP),
     )
     model.load_state_dict(_migrate_state_dict(state_dict["model"]))
     return model
+
+
+def export_checkpoint(source: str, destination: str, feature_clip: float | None = None) -> dict:
+    """Writes a release copy of a training checkpoint: architecture (with the feature clip the model is meant
+    to be used with) and weights, without the optimizer state. feature_clip=None keeps the source's own
+    (LEGACY_FEATURE_CLIP if it has none). Loading the copy with NanoTabPFNClassifier needs no other setting."""
+    state = torch.load(source, map_location="cpu", weights_only=False)
+    architecture = dict(state["architecture"])
+    architecture["feature_clip"] = float(
+        architecture.get("feature_clip", LEGACY_FEATURE_CLIP) if feature_clip is None else feature_clip
+    )
+    release = {"epoch": state.get("epoch"), "architecture": architecture, "model": state["model"],
+               "source": str(source)}
+    torch.save(release, destination)
+    return architecture
 
 
 # low_memory="auto" switches to low-memory inference when the (rows, columns, embedding) table of one
@@ -237,7 +252,7 @@ class NanoTabPFNClassifier:
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
         amp_dtype: torch.dtype | None = None,
-        low_memory: bool | str = "auto",
+        low_memory: bool | str = True,
         feature_clip: float | None = None,
     ):
         device = torch.device(get_default_device() if device is None else device)
@@ -263,8 +278,9 @@ class NanoTabPFNClassifier:
         # Mixed precision for inference, as amp_dtype in train(): e.g. torch.bfloat16 runs matmuls and
         # attention in bf16 (much faster on wide tables). None keeps fp32.
         self.amp_dtype = amp_dtype
-        # Low-memory inference (see TransformerEncoderLayer.low_memory): True/False force it; "auto" uses it
-        # for large tables and after an out-of-memory error (see _run_model).
+        # Low-memory inference (see TransformerEncoderLayer.low_memory), the default: as accurate as the normal
+        # path (identical in fp32, rounding differences in bf16), faster in our benchmarks, and correct on large
+        # tables where the normal path is not. "auto" uses the normal path for small tables (see _run_model).
         # feature_clip: bound of the normalized features (see normalize_features); None keeps the checkpoint's own.
         _configure(self, self.model, feature_clip, low_memory)
 
@@ -397,7 +413,7 @@ class NanoTabPFNRegressor:
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
         amp_dtype: torch.dtype | None = None,
-        low_memory: bool | str = "auto",
+        low_memory: bool | str = True,
         feature_clip: float | None = None,
     ):
         device = torch.device(get_default_device() if device is None else device)
@@ -437,8 +453,9 @@ class NanoTabPFNRegressor:
         # Mixed precision for inference, as amp_dtype in train(): e.g. torch.bfloat16 runs matmuls and
         # attention in bf16 (much faster on wide tables). None keeps fp32.
         self.amp_dtype = amp_dtype
-        # Low-memory inference (see TransformerEncoderLayer.low_memory): True/False force it; "auto" uses it
-        # for large tables and after an out-of-memory error (see _run_model).
+        # Low-memory inference (see TransformerEncoderLayer.low_memory), the default: as accurate as the normal
+        # path (identical in fp32, rounding differences in bf16), faster in our benchmarks, and correct on large
+        # tables where the normal path is not. "auto" uses the normal path for small tables (see _run_model).
         # feature_clip: bound of the normalized features (see normalize_features); None keeps the checkpoint's own.
         _configure(self, self.model, feature_clip, low_memory)
 

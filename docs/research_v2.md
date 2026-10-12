@@ -201,10 +201,10 @@ gisette and RELATHE, marked † in the paper); MLOmics, Shamir and the other HDL
 **1. A numerical bug of the normal inference path (gisette).** When the (rows, columns, embedding) table of
 one forward pass passes ~2^32 elements (gisette: 7000 x 5000 x 192 = 6.7e9), the normal path returns garbage
 (AUROC 0.5 or NaN), for every checkpoint, base and w5000 included. The low-memory path is correct (v2:
-0.993-0.995); all our earlier good gisette results had been run in low-memory mode. Fix (this PR):
-`low_memory="auto"`, the new default, uses low-memory inference from 2^31 elements (a property of the table,
-not of the GPU, so results do not depend on the GPU) and retries in low-memory mode after a CUDA
-out-of-memory error. Below the threshold nothing changes.
+0.993-0.995); all our earlier good gisette results had been run in low-memory mode. Fix: low-memory
+inference is now the default (`low_memory=True`; see the results below: as accurate, and faster).
+`low_memory="auto"` keeps the normal path except from 2^31 elements (a property of the table, not of the GPU)
+and after a CUDA out-of-memory error.
 
 **2. Too many extreme z-scores at once (RELATHE, BASEHOCK, PCMAC).** Features are z-scored with the training
 rows and clipped to ±100. In bag-of-words text almost every column is sparse, and a value present in a fraction
@@ -235,6 +235,50 @@ in madelon, colon, TOX_171, the miRNA tasks of MLOmics except GBM and the methyl
 results must not change; 1-15% in most MLOmics and HDLSS tasks; 20-46% in the mRNA and miRNA tasks of Shamir
 breast and sarcoma; 95-98% in the three text datasets.
 
-For the next model: train with the clip (`pretrain.py --feature-clip 10`, stored in the checkpoint), widen to at
+For the next model: train with the clip (now the default of `pretrain.py`, stored in the checkpoint), widen to at
 least 5000 columns, add sparse columns (mostly zeros with rare values, as in single-cell or microbiome data) to
 the widening, and keep RELATHE in the development set.
+
+### Results of the declared v2 (2026-10-12)
+
+The v2 was rerun on every paper task with clip ±10 and low-memory inference (`final_v2_clip10_{a,b}.csv`) and
+compared with its first run (clip ±100, normal path except BRCA with the four omics, `final_v2.csv`).
+
+**Low-memory is as accurate as the normal path, and faster.** In the tasks where no value reaches |z| = 10
+(madelon, colon, TOX_171, the miRNA tasks of MLOmics except GBM, the methylation tasks of Shamir) the clip does
+nothing, so the two runs differ only in the inference path: 24 of 104 folds are identical, the task means
+differ by at most 0.0005 (bf16 rounding; the largest fold difference, 0.02, is one colon fold of ~21 test
+samples). Every task ran as fast or faster in low-memory mode: median 0.67x the time, 2.8 h instead of 4.1 h in
+total. So low-memory became the default for every checkpoint.
+
+**The clip only helps.** No task lost more than 0.001. gisette† 0.505 -> 0.996 (inference bug), RELATHE†
+0.725 -> 0.948, PCMAC 0.806 -> 0.975, BASEHOCK 0.926 -> 0.996; the Shamir breast and sarcoma tasks with 20-46%
+of extreme columns all rose slightly (+0.001 to +0.008). As low-memory changes only rounding, this comparison is
+the ablation of the clip.
+
+**Standing** (mean AUROC over folds per task, then over tasks; dev datasets † and LGG/methylation, where every
+model is at ~0.5, left out; W-L and Wilcoxon p of the v2 against each model):
+
+| Model | MLOmics (24) | Shamir (12) | HDLSS (11) | All (47): AUROC, rank | v2 W-L, p |
+|---|---|---|---|---|---|
+| TabPFN-3.5 cover | 0.941 | 0.945 | 0.947 | 0.944, 2.06 | 18-29, 0.025 |
+| **v2 (clip 10, low-memory)** | **0.936** | **0.947** | **0.943** | **0.941, 2.60** | |
+| w5000 (v1) | 0.931 | 0.942 | 0.940 | 0.936, 3.85 | 37-10, 2e-5 |
+| TabPFN-3.5 (8 members) | 0.929 | 0.933 | 0.929 | 0.930, 5.11 | 38-9, 1e-5 |
+| TabPFN-Wide | 0.916 | 0.934 | 0.941 | 0.927, 5.18 | 39-8, 5e-8 |
+| TabICL-v2 | 0.921 | 0.934 | 0.901 | 0.920, 6.02 | 42-5, 1e-8 |
+| XGBoost / RF / LogReg-EN | 0.899-0.912 | 0.920-0.926 | 0.903-0.929 | 0.905-0.917, 6.0-7.2 | >= 37-10, < 2e-5 |
+
+TabPFN-v2 with one feature per group ran out of memory on 15 of the 24 MLOmics tasks. The v2 is first on
+Shamir (rank 1.67; against TabPFN-3.5 cover 7-5, p = 0.79), second on MLOmics (against cover 6-18, -0.005,
+p = 0.006) and on HDLSS (5-6, p = 0.28), with one forward pass of a 7.3M-parameter model against an ensemble of
+at least eight.
+
+**Limits.** madelon† stays at 0.897 (TabPFN-3.5 and TabICL-v2: ~0.97). On the four-omics MLOmics tasks (53-57k
+columns) a fold takes 87-216 s against 10-31 s for TabPFN-3.5, as for TabPFN-Wide: attention between all
+columns, which gives one attention score per gene, grows with the square of their number. On HDLSS and Shamir
+the times are comparable (median 7.6 and 10.6 s per fold).
+
+**Release.** `experiments/export_checkpoint.py` writes the v2 with its clip in the checkpoint
+(`--feature-clip 10`), so `NanoTabPFNClassifier(model="nanotabpfn_v2.pth")` is the declared model with no
+other setting. Checkpoints that do not record a clip (base, w5000) keep 100.
