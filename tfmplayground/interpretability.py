@@ -16,6 +16,16 @@ from sklearn.metrics import roc_auc_score
 
 WIDE = "tabpfn-wide-5k"
 RANDOM_FOREST = "random_forest"
+ANOVA = "anova"  # univariate F-test, the classic filter for omics feature selection
+
+# The 50 genes of the PAM50 breast cancer subtype classifier (Parker et al., 2009), which define the BRCA labels
+# of MLOmics, with the older names some expression tables still use.
+PAM50 = ("ACTR3B", "ANLN", "BAG1", "BCL2", "BIRC5", "BLVRA", "CCNB1", "CCNE1", "CDC20", "CDC6", "CDH3", "CENPF",
+         "CEP55", "CXXC5", "EGFR", "ERBB2", "ESR1", "EXO1", "FGFR4", "FOXA1", "FOXC1", "GPR160", "GRB7", "KIF2C",
+         "KRT14", "KRT17", "KRT5", "MAPT", "MDM2", "MELK", "MIA", "MKI67", "MLPH", "MMP11", "MYBL2", "MYC", "NAT1",
+         "NDC80", "NUF2", "ORC6", "PGR", "PHGDH", "PTTG1", "RRM2", "SFRP1", "SLC39A6", "TMEM45B", "TYMS", "UBE2C",
+         "UBE2T")
+PAM50_ALIASES = {"ORC6L": "ORC6", "KNTC2": "NDC80", "CDCA1": "NUF2"}
 
 
 def fit_and_explain(name: str, X_train: np.ndarray, y_train: np.ndarray, X_test: np.ndarray, device: str = "cuda",
@@ -24,9 +34,16 @@ def fit_and_explain(name: str, X_train: np.ndarray, y_train: np.ndarray, X_test:
     (higher = more important; NaN for columns a model dropped) and the predicted class probabilities of
     X_test, so that what a model says it uses can be judged together with how well it predicts.
     The attention scores come from the forward pass that predicts X_test (training and test rows).
-    name: "random_forest", "tabpfn-wide-5k" or the path of one of our checkpoints."""
+    name: "random_forest", "tabpfn-wide-5k", "anova" (F statistic, proba None) or the path of one of our
+    checkpoints."""
     X_train = np.asarray(X_train, dtype=np.float32)
     X_test = np.asarray(X_test, dtype=np.float32)
+    if name == ANOVA:  # no predictions: a filter, not a model
+        from sklearn.feature_selection import f_classif
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            f = f_classif(X_train, y_train)[0]
+        return np.where(np.isfinite(f), f, np.nan), None
     if name == RANDOM_FOREST:
         from sklearn.ensemble import RandomForestClassifier
 
@@ -77,3 +94,29 @@ def informative_auroc(scores: np.ndarray, informative: np.ndarray) -> float:
     is_informative = np.zeros(len(scores), dtype=bool)
     is_informative[np.asarray(informative)] = True
     return float(roc_auc_score(is_informative, _ranked(scores)))
+
+
+def top_k(scores: np.ndarray, k: int) -> np.ndarray:
+    """Indices of the k highest scores (NaN last)."""
+    return np.argsort(-_ranked(scores), kind="stable")[:k]
+
+
+def jaccard(a, b) -> float:
+    a, b = set(np.asarray(a).tolist()), set(np.asarray(b).tolist())
+    return len(a & b) / len(a | b) if a | b else float("nan")
+
+
+def gene_symbol(column: str) -> str:
+    """'ESR1', 'ESR1|2099' or 'ESR1.1' -> 'ESR1', with old PAM50 names mapped to the current ones."""
+    symbol = str(column).split("|")[0].strip().upper()
+    return PAM50_ALIASES.get(symbol, symbol)
+
+
+def hits_and_enrichment(ranked_symbols: list[str], gene_set: set[str], universe: set[str], k: int) -> tuple[int, float]:
+    """How many of the k top-ranked genes are in gene_set, and the hypergeometric p-value of at least that many
+    by chance (gene_set restricted to the genes present)."""
+    from scipy.stats import hypergeom
+
+    present = gene_set & universe
+    hits = len(set(ranked_symbols[:k]) & present)
+    return hits, float(hypergeom.sf(hits - 1, len(universe), len(present), k))
