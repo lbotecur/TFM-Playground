@@ -7,6 +7,9 @@ Models: our checkpoints (paths), random_forest, logreg, logreg_en, xgboost, tabp
 tabpfn-v2-gn2p4bpt, tabpfn-3.5 (":n8" = 8 ensemble members, ":auto" = package default, 8 members fixed by
 the checkpoint, ":cover" = enough members, ceil(features / 768) and at least 8, for every feature to be seen).
 External models need tfm_ext.
+Our checkpoints run in low-memory inference by default (labelled [low-memory]; --no-low-memory for the normal
+path), with the feature clip saved in their checkpoint (10 for v2 on, 100 for older ones); --feature-clip
+overrides it (labelled e.g. [clip10]).
 
 Example, from the repo root:
     python experiments/eval_benchmark.py --gpu 0 --bf16 \\
@@ -30,8 +33,12 @@ parser.add_argument("--models", nargs="+", required=True)
 parser.add_argument("--n-features", nargs="+", type=int, default=[0], help="0 = all features")
 parser.add_argument("--gpu", type=int, default=0)
 parser.add_argument("--bf16", action="store_true", help="run our checkpoints in bf16 (labelled [bfloat16])")
-parser.add_argument("--low-memory", action="store_true",
-                    help="our checkpoints: low-memory inference for very wide tables (labelled [low-memory])")
+parser.add_argument("--low-memory", action=argparse.BooleanOptionalAction, default=True,
+                    help="our checkpoints: low-memory inference (default, labelled [low-memory]); --no-low-memory "
+                         "uses the normal path except for tables too large for it, unlabelled, as earlier runs")
+parser.add_argument("--feature-clip", type=float, default=None,
+                    help="our checkpoints: bound of the normalized features (default: the checkpoint's own, 100 "
+                         "for every checkpoint saved before it was configurable); labelled e.g. [clip10]")
 parser.add_argument("--output", default="workdir/eval/benchmarks.csv")
 parser.add_argument("--data-root", default=str(REPO.parent), help="folder that contains each benchmark's data")
 args = parser.parse_args()
@@ -46,4 +53,5 @@ run_benchmark(
     device=f"cuda:{args.gpu}",
     amp_dtype=torch.bfloat16 if args.bf16 else None,
     low_memory=args.low_memory,
+    feature_clip=args.feature_clip,
 )

@@ -10,20 +10,32 @@ from torch.utils.checkpoint import checkpoint
 
 # Fixed seed of the per-column random vectors (see NanoTabPFNModel.add_column_embeddings).
 COLUMN_EMBEDDING_SEED = 42
+# Bound of the normalized features (see normalize_features). 10 from v2 on; checkpoints saved before the clip was
+# configurable (base, w5000, ...) were trained and evaluated with LEGACY_FEATURE_CLIP and keep it when loaded.
+DEFAULT_FEATURE_CLIP = 10.0
+LEGACY_FEATURE_CLIP = 100.0
 
 
 class NanoTabPFNModel(nn.Module):
     def __init__(
-        self, embedding_size: int, num_attention_heads: int, mlp_hidden_size: int, num_layers: int, num_outputs: int
+        self,
+        embedding_size: int,
+        num_attention_heads: int,
+        mlp_hidden_size: int,
+        num_layers: int,
+        num_outputs: int,
+        feature_clip: float = DEFAULT_FEATURE_CLIP,
     ):
-        """Initializes the feature/target encoder, transformer blocks and decoder"""
+        """Initializes the feature/target encoder, transformer blocks and decoder. feature_clip: normalized
+        feature values are clipped to [-feature_clip, feature_clip] (see normalize_features); it is not a
+        weight, so it lives in feature_encoder.clip and in the checkpoint's architecture."""
         super().__init__()
         self.embedding_size = embedding_size
         self.num_attention_heads = num_attention_heads
         self.mlp_hidden_size = mlp_hidden_size
         self.num_layers = num_layers
         self.num_outputs = num_outputs
-        self.feature_encoder = FeatureEncoder(embedding_size)
+        self.feature_encoder = FeatureEncoder(embedding_size, clip=feature_clip)
         # Projects a fixed random vector per feature column into the embedding space (TabPFNv2's
         # "subspace" feature positional embedding), see add_column_embeddings.
         self.column_embedding = nn.Linear(embedding_size // 4, embedding_size)
@@ -142,10 +154,18 @@ class NanoTabPFNModel(nn.Module):
         return output
 
 
-def normalize_features(x: torch.Tensor, train_test_split_index: int) -> torch.Tensor:
+def normalize_features(
+    x: torch.Tensor, train_test_split_index: int, clip: float = DEFAULT_FEATURE_CLIP
+) -> torch.Tensor:
     """
     Normalizes each feature based on the mean and std of the training rows (ignoring
-    missing entries), imputes the missing entries and clips outliers to [-100, 100].
+    missing entries), imputes the missing entries and clips outliers to [-clip, clip].
+    A clip of 100 (the original one, LEGACY_FEATURE_CLIP) only guards against absurd values
+    (a column constant in the training rows has std ~ eps, so any other value in a test row
+    becomes ~1e7). The default 10 also bounds the z-scores of rare values: a binary column
+    whose ones are a fraction p of the rows gives them z ~ sqrt((1 - p) / p), about 30 for
+    p = 0.1%, which wide sparse tables (bag-of-words text) have in almost every column and the
+    prior almost never produces. It changes 0.01-0.02% of the prior's values.
     Emits a per-cell missing indicator alongside the value, so the embedding sees
     "value + was-missing" as one unit per feature. This is the feature preprocessing,
     kept separate from the embedding so it can be reused and tested on its own.
@@ -154,6 +174,7 @@ def normalize_features(x: torch.Tensor, train_test_split_index: int) -> torch.Te
         x: (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features)
         train_test_split_index: (int) the number of datapoints in X_train; the stats
                                 use only x[:, :train_test_split_index]
+        clip: (float) bound of the normalized values
     Returns:
         (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, 2), whose
                        last axis is [normalized_value, missing_indicator]
@@ -173,18 +194,21 @@ def normalize_features(x: torch.Tensor, train_test_split_index: int) -> torch.Te
     x = (x - mean) / std
     # Impute the holes to 0, i.e. the train mean after normalization.
     x = torch.nan_to_num(x, nan=0.0)
-    x = torch.clip(x, min=-100, max=100)
+    x = torch.clip(x, min=-clip, max=clip)
     return torch.cat([x, indicator], dim=-1)
 
 class FeatureEncoder(nn.Module):
-    def __init__(self, embedding_size: int):
+    def __init__(self, embedding_size: int, clip: float = DEFAULT_FEATURE_CLIP):
         """Creates the linear layer that we will use to embed our features.
 
         Input width is 2 because normalize_features emits [value, missing_indicator]
         per cell, so value and indicator are projected together into one embedding.
+        clip: bound of the normalized values (see normalize_features). A plain attribute, not
+        a weight, so it can be changed at inference time without touching the state dict.
         """
         super().__init__()
         self.linear_layer = nn.Linear(2, embedding_size)
+        self.clip = float(clip)
 
     def forward(self, x: torch.Tensor, train_test_split_index: int) -> torch.Tensor:
         """
@@ -198,7 +222,7 @@ class FeatureEncoder(nn.Module):
             (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size), representing
                            the embeddings of the features
         """
-        return self.linear_layer(normalize_features(x, train_test_split_index))
+        return self.linear_layer(normalize_features(x, train_test_split_index, self.clip))
 
 
 def pad_targets(y_train: torch.Tensor, num_rows: int) -> torch.Tensor:

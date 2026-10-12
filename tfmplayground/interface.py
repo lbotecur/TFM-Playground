@@ -1,4 +1,5 @@
 import os
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 
-from tfmplayground.models.nanotabpfn import NanoTabPFNModel
+from tfmplayground.models.nanotabpfn import LEGACY_FEATURE_CLIP, NanoTabPFNModel
 from tfmplayground.normalization import (
     compute_target_stats_numpy,
     denormalize_predictions,
@@ -72,9 +73,75 @@ def init_model_from_state_dict_file(file_path):
         mlp_hidden_size=state_dict["architecture"]["mlp_hidden_size"],
         num_layers=state_dict["architecture"]["num_layers"],
         num_outputs=state_dict["architecture"]["num_outputs"],
+        # checkpoints saved before the clip was configurable were all trained with 100
+        feature_clip=state_dict["architecture"].get("feature_clip", LEGACY_FEATURE_CLIP),
     )
     model.load_state_dict(_migrate_state_dict(state_dict["model"]))
     return model
+
+
+def export_checkpoint(source: str, destination: str, feature_clip: float | None = None) -> dict:
+    """Writes a release copy of a training checkpoint: architecture (with the feature clip the model is meant
+    to be used with) and weights, without the optimizer state. feature_clip=None keeps the source's own
+    (LEGACY_FEATURE_CLIP if it has none). Loading the copy with NanoTabPFNClassifier needs no other setting."""
+    state = torch.load(source, map_location="cpu", weights_only=False)
+    architecture = dict(state["architecture"])
+    architecture["feature_clip"] = float(
+        architecture.get("feature_clip", LEGACY_FEATURE_CLIP) if feature_clip is None else feature_clip
+    )
+    release = {"epoch": state.get("epoch"), "architecture": architecture, "model": state["model"],
+               "source": str(source)}
+    torch.save(release, destination)
+    return architecture
+
+
+# low_memory="auto" switches to low-memory inference when the (rows, columns, embedding) table of one
+# forward pass has at least this many elements. Above ~2**32 elements the normal path returned garbage
+# (AUROC 0.5 or NaN on gisette: 7000 rows x 5000 features x 192) while low-memory was correct; 2**31
+# keeps a margin. It depends only on the table, not on the GPU, so results do not change across GPUs.
+LOW_MEMORY_AUTO_ELEMENTS = 2**31
+
+
+def _configure(estimator, model, feature_clip, low_memory):
+    """Shared by the classifier and the regressor: feature clip and low-memory mode."""
+    if feature_clip is not None:
+        model.feature_encoder.clip = float(feature_clip)
+    if low_memory not in (True, False, "auto"):
+        raise ValueError(f"low_memory must be True, False or 'auto', got {low_memory!r}")
+    estimator.low_memory = low_memory
+    _set_low_memory(model, low_memory is True)
+
+
+def _set_low_memory(model, on: bool):
+    for block in getattr(model, "transformer_blocks", []):
+        block.low_memory = on
+
+
+def _run_model(estimator, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """One forward pass (under no_grad, in the estimator's amp_dtype) for x = [X_train; X_test].
+    With low_memory="auto", large tables (see LOW_MEMORY_AUTO_ELEMENTS) run in low-memory mode, and a
+    CUDA out-of-memory error in normal mode is retried once in low-memory mode, so a table either gets a
+    correct answer or a real error. True/False force one mode."""
+    model, mode = estimator.model, estimator.low_memory
+    if mode == "auto":
+        elements = x.shape[1] * (x.shape[2] + 1) * model.embedding_size  # +1: the target column
+        use_low_memory = elements >= LOW_MEMORY_AUTO_ELEMENTS
+    else:
+        use_low_memory = bool(mode)
+
+    def forward(low_memory: bool) -> torch.Tensor:
+        _set_low_memory(model, low_memory)
+        with autocast(estimator.device, estimator.amp_dtype):
+            return model((x, y), train_test_split_index=len(estimator.X_train), num_mem_chunks=estimator.num_mem_chunks)
+
+    if mode != "auto" or use_low_memory:
+        return forward(use_low_memory)
+    try:
+        return forward(False)
+    except torch.cuda.OutOfMemoryError:
+        warnings.warn("Out of GPU memory in normal mode; retrying with low-memory inference.", stacklevel=3)
+        torch.cuda.empty_cache()
+        return forward(True)
 
 
 # doing these as lambdas would cause NanoTabPFNClassifier to not be pickle-able,
@@ -185,7 +252,8 @@ class NanoTabPFNClassifier:
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
         amp_dtype: torch.dtype | None = None,
-        low_memory: bool = False,
+        low_memory: bool | str = True,
+        feature_clip: float | None = None,
     ):
         device = torch.device(get_default_device() if device is None else device)
         if model is None:
@@ -210,10 +278,11 @@ class NanoTabPFNClassifier:
         # Mixed precision for inference, as amp_dtype in train(): e.g. torch.bfloat16 runs matmuls and
         # attention in bf16 (much faster on wide tables). None keeps fp32.
         self.amp_dtype = amp_dtype
-        # Inference on very wide tables (tens of thousands of features): see TransformerEncoderLayer.low_memory.
-        self.low_memory = low_memory
-        for block in getattr(self.model, "transformer_blocks", []):
-            block.low_memory = low_memory
+        # Low-memory inference (see TransformerEncoderLayer.low_memory), the default: as accurate as the normal
+        # path (identical in fp32, rounding differences in bf16), faster in our benchmarks, and correct on large
+        # tables where the normal path is not. "auto" uses the normal path for small tables (see _run_model).
+        # feature_clip: bound of the normalized features (see normalize_features); None keeps the checkpoint's own.
+        _configure(self, self.model, feature_clip, low_memory)
 
     def fit(self, 
             X_train: np.ndarray | pd.DataFrame, 
@@ -256,10 +325,7 @@ class NanoTabPFNClassifier:
         with torch.no_grad():
             x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)  # introduce batch size 1
             y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-            with autocast(self.device, self.amp_dtype):
-                out = self.model(
-                    (x, y), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks
-                )
+            out = _run_model(self, x, y)
             out = out.float().squeeze(0)  # softmax in fp32; remove batch size 1
             # our pretrained classifier supports up to num_outputs classes, if the dataset has less we cut off the rest
             out = out[:, : self.num_classes]
@@ -296,8 +362,7 @@ class NanoTabPFNClassifier:
             with torch.no_grad():
                 xt = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
                 yt = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-                with autocast(self.device, self.amp_dtype):
-                    self.model((xt, yt), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks)
+                _run_model(self, xt, yt)
             # average over layers: stack to (num_layers, C) -> (C,); last entry is target->target
             per_layer = torch.stack([block.feature_attention for block in blocks], dim=0)
             attention_to_columns = per_layer.mean(dim=0)[:-1].to("cpu").numpy()  # (C-1,) transformed cols
@@ -326,8 +391,7 @@ class NanoTabPFNClassifier:
             with torch.no_grad():
                 xt = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
                 yt = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-                with autocast(self.device, self.amp_dtype):
-                    self.model((xt, yt), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks)
+                _run_model(self, xt, yt)
             embeddings = self.model.embeddings[0, len(self.X_train):, :].float().to("cpu").numpy()
         finally:
             self.model.save_embeddings = False
@@ -349,7 +413,8 @@ class NanoTabPFNRegressor:
         max_unique_for_categorical: int = 10,
         min_samples_for_categorical_inference: int = 30,
         amp_dtype: torch.dtype | None = None,
-        low_memory: bool = False,
+        low_memory: bool | str = True,
+        feature_clip: float | None = None,
     ):
         device = torch.device(get_default_device() if device is None else device)
         if model is None:
@@ -388,10 +453,11 @@ class NanoTabPFNRegressor:
         # Mixed precision for inference, as amp_dtype in train(): e.g. torch.bfloat16 runs matmuls and
         # attention in bf16 (much faster on wide tables). None keeps fp32.
         self.amp_dtype = amp_dtype
-        # Inference on very wide tables (tens of thousands of features): see TransformerEncoderLayer.low_memory.
-        self.low_memory = low_memory
-        for block in getattr(self.model, "transformer_blocks", []):
-            block.low_memory = low_memory
+        # Low-memory inference (see TransformerEncoderLayer.low_memory), the default: as accurate as the normal
+        # path (identical in fp32, rounding differences in bf16), faster in our benchmarks, and correct on large
+        # tables where the normal path is not. "auto" uses the normal path for small tables (see _run_model).
+        # feature_clip: bound of the normalized features (see normalize_features); None keeps the checkpoint's own.
+        _configure(self, self.model, feature_clip, low_memory)
 
     def fit(self, 
             X_train:np.ndarray | pd.DataFrame, 
@@ -426,10 +492,7 @@ class NanoTabPFNRegressor:
             X_tensor = torch.tensor(X, dtype=torch.float32, device=self.device).unsqueeze(0)
             y_tensor = torch.tensor(y, dtype=torch.float32, device=self.device).unsqueeze(0)
 
-            with autocast(self.device, self.amp_dtype):
-                logits = self.model(
-                    (X_tensor, y_tensor), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks
-                )
+            logits = _run_model(self, X_tensor, y_tensor)
             logits = logits.float().squeeze(0)  # distribution in fp32
             preds_n = self.dist.mean(logits)
             preds = denormalize_predictions(preds_n, self.y_train_mean, self.y_train_std)
@@ -450,8 +513,7 @@ class NanoTabPFNRegressor:
             with torch.no_grad():
                 xt = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
                 yt = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-                with autocast(self.device, self.amp_dtype):
-                    self.model((xt, yt), train_test_split_index=len(self.X_train), num_mem_chunks=self.num_mem_chunks)
+                _run_model(self, xt, yt)
             embeddings = self.model.embeddings[0, len(self.X_train):, :].float().to("cpu").numpy()
         finally:
             self.model.save_embeddings = False

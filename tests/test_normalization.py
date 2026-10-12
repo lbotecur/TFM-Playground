@@ -34,7 +34,8 @@ def test_normalize_features_uses_train_statistics_for_test_rows():
     x = torch.cat([train, test], dim=0).unsqueeze(0)            # (1, 7, 1)
     n_train = train.shape[0]
 
-    normalized = normalize_features(x, train_test_split_index=n_train)[..., 0]  # value channel, (1, 7, 1)
+    # clip=100: the second test value has z ~ 10.7, above the default clip of 10
+    normalized = normalize_features(x, train_test_split_index=n_train, clip=100.0)[..., 0]  # (1, 7, 1)
     normalized_test = normalized[:, n_train:].flatten()  # just the test values
 
     # Expected: reuse the same rule but with train stats only.
@@ -50,7 +51,7 @@ def test_normalize_features_uses_train_statistics_for_test_rows():
 
 
 def test_normalize_features_clips_extreme_values_to_plus_minus_100():
-    """After normalization, values are clipped to the [-100, 100] range.
+    """With clip=100 (the clip of every checkpoint before v2), values are clipped to the [-100, 100] range.
 
     A test point far outside the train distribution normalizes to a huge
     z-score (the train stats don't include it, so there's no self-limiting).
@@ -61,7 +62,7 @@ def test_normalize_features_clips_extreme_values_to_plus_minus_100():
     test = torch.tensor([[1e6]])                          # (1, 1)
     x = torch.cat([train, test], dim=0).unsqueeze(0)      # (1, 5, 1)
 
-    normalized = normalize_features(x, train_test_split_index=train.shape[0])[..., 0].flatten()  # value channel
+    normalized = normalize_features(x, train_test_split_index=train.shape[0], clip=100.0)[..., 0].flatten()
 
     # Nothing may exceed the clip bounds.
     assert normalized.max() <= 100.0
