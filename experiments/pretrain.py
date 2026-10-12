@@ -68,6 +68,12 @@ parser.add_argument("--filter-graphs", action="store_true",
 parser.add_argument("--filter-datasets", action="store_true",
                     help="graph_scm: resample tables an ExtraTrees cannot predict better than a constant (as TabICLv2)")
 parser.add_argument("--clip", type=float, default=1.0, help="maximum gradient norm (1.0 in all earlier runs)")
+parser.add_argument("--widen-max-rows", type=int, default=0,
+                    help="rows kept in widened batches (0 = all); narrow batches keep up to --max-rows")
+parser.add_argument("--sparse-columns-prob", type=float, default=0.0,
+                    help="probability that a widened batch gets sparse (zero-inflated) columns (0 in all runs before v3)")
+parser.add_argument("--sparse-columns-max-fraction", type=float, default=1.0,
+                    help="largest share of a widened batch's columns made sparse")
 parser.add_argument("--feature-clip", type=float, default=None,
                     help="bound of the normalized features, saved in the checkpoint. Default: 10 for a new run (100 in "
                          "all runs before v2); a resumed run keeps the one it was trained with")
@@ -176,6 +182,9 @@ widening = WideningConfig(
     include_original_prob=0.5,
     max_cats=20,
     prob_no_widening=args.prob_no_widening,
+    max_rows=args.widen_max_rows,
+    sparse_columns_prob=args.sparse_columns_prob,
+    sparse_columns_max_fraction=args.sparse_columns_max_fraction,
 )
 
 trained_model, loss = train(

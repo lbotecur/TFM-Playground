@@ -24,8 +24,8 @@ import torch
 
 from tfmplayground.benchmarks.models import is_checkpoint
 from tfmplayground.interface import init_model_from_state_dict_file
-from tfmplayground.validation import (DEV_DATASETS, PRIOR_SETS, PROBES, load_prior_sets, prior_metrics,
-                                     prior_metrics_classifier, probe_name, run_dev, run_probes)
+from tfmplayground.validation import (BENCHMARK_DEV_DATASETS, DEV_DATASETS, PRIOR_SETS, PROBES, load_prior_sets,
+                                     prior_metrics, prior_metrics_classifier, probe_name, run_dev, run_probes)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--runs", nargs="*", default=[], help="run directories: every epoch_*.pth in them")
@@ -45,6 +45,9 @@ parser.add_argument("--build-only", action="store_true", help="only build the he
 parser.add_argument("--reference", type=int, default=0,
                     help="also the held-out loss through each model's classifier interface on the first N tables "
                          "of each set, for ours and external models alike (e.g. tabicl-v2, the reference)")
+parser.add_argument("--feature-clip", type=float, default=None,
+                    help="our checkpoints: feature clip to evaluate with (default: each checkpoint's own; 10 shows "
+                         "runs trained with 100, such as v2.5, as the v2 is used)")
 parser.add_argument("--watch", type=float, default=0, help="minutes between looks for new checkpoints (0 = once)")
 args = parser.parse_args()
 device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
@@ -88,6 +91,8 @@ def evaluate(name: str, done: set):
     if ours and prior_sets and any((name, s, 0) not in done for s in prior_sets):
         try:
             model = init_model_from_state_dict_file(name).to(device)
+            if args.feature_clip is not None:
+                model.feature_encoder.clip = args.feature_clip
         except (RuntimeError, EOFError) as error:  # a snapshot still being written: next round
             print(f"skipping {name} for now: {error}", flush=True)
             return
@@ -107,18 +112,20 @@ def evaluate(name: str, done: set):
             key = f"ref_{set_name}"
             if (name, key, 0) in done:
                 continue
-            metrics = prior_metrics_classifier(name, tables[: args.reference], device)
+            metrics = prior_metrics_classifier(name, tables[: args.reference], device, args.feature_clip)
             rows += [{**base, "kind": "prior_ref", "set": key, "seed": 0, "metric": k, "value": v}
                      for k, v in metrics.items()]
         save(rows)
     if not args.skip_dev:
-        todo = [d for d in DEV_DATASETS if (name, f"dev_{d}", 0) not in done]
+        todo = [d for d in DEV_DATASETS + BENCHMARK_DEV_DATASETS if (name, f"dev_{d}", 0) not in done]
         if todo:
-            save([{**base, "kind": "dev", **r} for r in run_dev(name, device, args.data_root, todo)])
+            rows = run_dev(name, device, args.data_root, todo, feature_clip=args.feature_clip)
+            save([{**base, "kind": "dev", **r} for r in rows])
     if not args.skip_probes:
         todo = [p for p in PROBES if any((name, probe_name(*p), s) not in done for s in range(args.seeds))]
         if todo:
-            save([{**base, "kind": "probe", **r} for r in run_probes(name, device, args.seeds, todo)])
+            rows = run_probes(name, device, args.seeds, todo, feature_clip=args.feature_clip)
+            save([{**base, "kind": "probe", **r} for r in rows])
     print(f"{time.strftime('%H:%M')} validated {name}", flush=True)
 
 
