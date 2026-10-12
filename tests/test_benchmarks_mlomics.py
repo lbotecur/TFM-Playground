@@ -150,15 +150,50 @@ def test_low_memory_label_only_for_our_checkpoints(tmp_path, monkeypatch):
     seen = []
     real = runner.make_model
 
-    def spy(name, device, amp_dtype=None, categorical=None, low_memory=False):
-        seen.append((name, low_memory))
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None):
+        seen.append((name, low_memory, feature_clip))
         return real("random_forest", "cpu")
 
     monkeypatch.setattr(runner, "make_model", spy)
     res = runner.run_benchmark(["mlomics/BRCA/mrna"], ["ckpt.pth", "random_forest"], tmp_path / "r.csv", tmp_path,
                                device="cpu", low_memory=True)
     assert set(res.model) == {"ckpt.pth [low-memory]", "random_forest"}
-    assert ("ckpt.pth", True) in seen and ("random_forest", False) in seen
+    assert ("ckpt.pth", True, None) in seen and ("random_forest", "auto", None) in seen
+
+
+def test_without_low_memory_our_checkpoints_use_auto_and_keep_their_label(tmp_path, monkeypatch):
+    from tfmplayground.benchmarks import runner
+
+    _fake_mlomics(tmp_path / mlomics.FOLDER)
+    seen = []
+    real = runner.make_model
+
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None):
+        seen.append((name, low_memory))
+        return real("random_forest", "cpu")
+
+    monkeypatch.setattr(runner, "make_model", spy)
+    res = runner.run_benchmark(["mlomics/BRCA/mrna"], ["ckpt.pth"], tmp_path / "r.csv", tmp_path, device="cpu")
+    assert set(res.model) == {"ckpt.pth"}
+    assert set(seen) == {("ckpt.pth", "auto")}
+
+
+def test_feature_clip_label_and_value_only_for_our_checkpoints(tmp_path, monkeypatch):
+    from tfmplayground.benchmarks import runner
+
+    _fake_mlomics(tmp_path / mlomics.FOLDER)
+    seen = []
+    real = runner.make_model
+
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None):
+        seen.append((name, feature_clip))
+        return real("random_forest", "cpu")
+
+    monkeypatch.setattr(runner, "make_model", spy)
+    res = runner.run_benchmark(["mlomics/BRCA/mrna"], ["ckpt.pth", "random_forest"], tmp_path / "r.csv", tmp_path,
+                               device="cpu", low_memory=True, feature_clip=10.0)
+    assert set(res.model) == {"ckpt.pth [low-memory] [clip10]", "random_forest"}
+    assert ("ckpt.pth", 10.0) in seen and ("random_forest", None) in seen
 
 
 def test_paired_leaves_out_nan_folds():

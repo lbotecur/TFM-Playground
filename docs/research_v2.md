@@ -190,3 +190,51 @@ to 0.07 between consecutive snapshots of a run (5 seeds), so they explain, they 
 
 Smoke test (2 GPUs, batch 16 x accumulation 4, rows 40-1024, 7 workers): 17 tables/s with no waiting for the
 prior, so 640k tables take about 10 hours per run.
+
+## Two inference problems found in the final evaluation (2026-10-12)
+
+The first full benchmark run of the v2 candidate (`v2_p1_big-e100-rows2048-e100-w3000r1024-e30-lr3e-5/epoch_30`)
+failed on four HDLSS datasets (gisette 0.505, RELATHE 0.725, PCMAC 0.806, BASEHOCK 0.926) while doing well
+on MLOmics and Shamir. Both causes were found and fixed with development datasets only (madelon, arcene,
+gisette and RELATHE, marked † in the paper); MLOmics, Shamir and the other HDLSS datasets were not used.
+
+**1. A numerical bug of the normal inference path (gisette).** When the (rows, columns, embedding) table of
+one forward pass passes ~2^32 elements (gisette: 7000 x 5000 x 192 = 6.7e9), the normal path returns garbage
+(AUROC 0.5 or NaN), for every checkpoint, base and w5000 included. The low-memory path is correct (v2:
+0.993-0.995); all our earlier good gisette results had been run in low-memory mode. Fix (this PR):
+`low_memory="auto"`, the new default, uses low-memory inference from 2^31 elements (a property of the table,
+not of the GPU, so results do not depend on the GPU) and retries in low-memory mode after a CUDA
+out-of-memory error. Below the threshold nothing changes.
+
+**2. Too many extreme z-scores at once (RELATHE, BASEHOCK, PCMAC).** Features are z-scored with the training
+rows and clipped to ±100. In bag-of-words text almost every column is sparse, and a value present in a fraction
+p of the rows gets z ~ sqrt((1 - p) / p): 95-98% of the columns of these datasets reach |z| > 10 (up to 45).
+The graph_scm prior produces some such values (44% of tables have one) but never this many: over 300 tables
+at up to 1024 rows, with or without widening, at most 43% of a table's columns reach |z| > 10, the median is
+0%, and no table has more than half. The v2 candidate fails in proportion to them (RELATHE with k random
+columns: 0.881 at 1000, 0.813 at 2000, 0.755 at 3000, 0.728 at 4322; its parent rows2048 e100: 0.905, 0.891,
+0.908, 0.929). The sensitivity appeared in the w3000r1024 stage (RELATHE 0.928 at its start, 0.914 at e10,
+0.661 at e30), while the same stage widened to 5000 columns improved it (0.942 at e10, all 30 folds above
+w3000r1024 e10). The w5000 model of the paper never had it (0.910).
+
+The ±100 clip comes from TabPFN's scaler, where it only guards against absurd values (a column constant in
+the training rows has std ~ eps). TabPFN treats outliers separately (by default a soft clip at 12 standard
+deviations for classification, and quantile and SVD transforms in its ensemble); nanoTabPFN kept only the
+guard. A clip at ±10 changes 0.01-0.02% of the prior's values, so it leaves the training distribution alone
+and only bounds what lies outside it. With it the v2 candidate rises with the number of columns as its parent
+does (RELATHE with k columns: 0.915, 0.937, 0.940, 0.949), and on every development dataset it changes
+nothing or helps: madelon (no |z| > 10) 0.897 -> 0.897, arcene (6% of columns) 0.942 -> 0.947, gisette
+(26%, low-memory) 0.994 -> 0.996, RELATHE (95%) 0.73 -> 0.95, the development set of the fixed validation
+0.973 -> 0.974. Only one value, 10, was tried.
+
+**The v2 of the paper is therefore declared as** that checkpoint with `feature_clip=10` and automatic
+low-memory inference, decided before any paper benchmark was rerun. The ablation with and without the clip is
+reported. Every other model keeps its own documented configuration (w5000 and base: clip 100). Before the
+rerun, the share of columns with |z| > 10 in each paper benchmark task was measured (data only, no model): 0%
+in madelon, colon, TOX_171, the miRNA tasks of MLOmics except GBM and the methylation tasks of Shamir, whose
+results must not change; 1-15% in most MLOmics and HDLSS tasks; 20-46% in the mRNA and miRNA tasks of Shamir
+breast and sarcoma; 95-98% in the three text datasets.
+
+For the next model: train with the clip (`pretrain.py --feature-clip 10`, stored in the checkpoint), widen to at
+least 5000 columns, add sparse columns (mostly zeros with rare values, as in single-cell or microbiome data) to
+the widening, and keep RELATHE in the development set.

@@ -68,6 +68,8 @@ parser.add_argument("--filter-graphs", action="store_true",
 parser.add_argument("--filter-datasets", action="store_true",
                     help="graph_scm: resample tables an ExtraTrees cannot predict better than a constant (as TabICLv2)")
 parser.add_argument("--clip", type=float, default=1.0, help="maximum gradient norm (1.0 in all earlier runs)")
+parser.add_argument("--feature-clip", type=float, default=100.0,
+                    help="bound of the normalized features (100 in all earlier runs), saved in the checkpoint")
 parser.add_argument("--multi-gpu", action="store_true",
                     help="split each batch over every visible GPU (nn.DataParallel); choose them with "
                          "CUDA_VISIBLE_DEVICES and leave --gpu at 0. Each GPU gets batch-size / GPUs tables")
@@ -141,6 +143,7 @@ model = NanoTabPFNModel(
     mlp_hidden_size=768,
     num_layers=12,
     num_outputs=MAX_CLASSES,
+    feature_clip=args.feature_clip,
 ).to(device)
 model.gradient_checkpointing = True
 

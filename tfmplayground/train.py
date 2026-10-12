@@ -230,6 +230,7 @@ def train(
                     "num_attention_heads": int((model.module if multi_gpu else model).num_attention_heads),
                     "mlp_hidden_size": int((model.module if multi_gpu else model).mlp_hidden_size),
                     "num_outputs": int((model.module if multi_gpu else model).num_outputs),
+                    "feature_clip": float((model.module if multi_gpu else model).feature_encoder.clip),
                 },
                 "model": (model.module if multi_gpu else model).state_dict(),
                 "optimizer": optimizer.state_dict(),

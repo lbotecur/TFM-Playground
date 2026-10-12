@@ -104,13 +104,17 @@ def run_benchmark(
     device: str = "cuda",
     amp_dtype=None,
     low_memory: bool = False,
+    feature_clip: float | None = None,
 ) -> pd.DataFrame:
     """Evaluates every model on every dataset ("<benchmark>/<name>", e.g. "mlomics/BRCA/mrna+cnv") and
     feature count (0 = all; otherwise feature agglomeration, only for all-numeric data), with the folds
     of each benchmark. Appends one row per fold to the CSV and skips folds already there, so it can be
     resumed. Every model is told which columns are categorical. Our checkpoints run in amp_dtype if
-    given, and are then labelled with it (e.g. "path [bfloat16]"); with low_memory they are labelled
-    "[low-memory]" too, so both versions can be compared fold by fold."""
+    given, and are then labelled with it (e.g. "path [bfloat16]"); with low_memory they are forced to
+    low-memory inference and labelled "[low-memory]" too, so both versions can be compared fold by fold.
+    Without it they use low_memory="auto" (low-memory only for tables too large for the normal path, see
+    LOW_MEMORY_AUTO_ELEMENTS), which gives the normal path's results everywhere else. feature_clip bounds their
+    normalized features (see normalize_features) and is labelled too, e.g. "[clip10]"."""
     output = Path(output)
     results = pd.read_csv(output) if output.exists() else pd.DataFrame(columns=RESULT_COLUMNS)
     for spec in datasets:
@@ -132,6 +136,8 @@ def run_benchmark(
                     label = f"{model_name} [{str(amp_dtype).split('.')[-1]}]"
                 if ours and low_memory:
                     label = f"{label} [low-memory]"
+                if ours and feature_clip is not None:
+                    label = f"{label} [clip{feature_clip:g}]"
                 done = set(results[(results.benchmark == benchmark) & (results.dataset == name)
                                    & (results.n_features == X.shape[1]) & (results.model == label)].fold)
                 for i, (train_idx, test_idx) in enumerate(folds):
@@ -139,7 +145,8 @@ def run_benchmark(
                         continue
                     start = time.time()
                     model = make_model(model_name, device, amp_dtype if ours else None, categorical=categorical,
-                                       low_memory=low_memory and ours)
+                                       low_memory=True if (low_memory and ours) else "auto",
+                                       feature_clip=feature_clip if ours else None)
                     proba = predict_proba(model, X[train_idx], y[train_idx], X[test_idx])
                     row = {"benchmark": benchmark, "dataset": name, "n_features": X.shape[1], "model": label,
                            "fold": i, "accuracy": accuracy(y[test_idx], proba), "roc_auc": roc_auc(y[test_idx], proba),
