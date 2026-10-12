@@ -282,3 +282,88 @@ the times are comparable (median 7.6 and 10.6 s per fold).
 **Release.** `experiments/export_checkpoint.py` writes the v2 with its clip in the checkpoint
 (`--feature-clip 10`), so `NanoTabPFNClassifier(model="nanotabpfn_v2.pth")` is the declared model with no
 other setting. Checkpoints that do not record a clip (base, w5000) keep 100.
+
+### Length of the last stage (2026-10-12)
+
+The run that produced the v2 (`…-w3000r1024-e30-lr3e-5`) kept training after epoch 30 was chosen. Its snapshots,
+with the v2's inference settings (clip ±10, low-memory), on the development datasets (mean AUROC; e165 against
+e30 per fold, Wilcoxon):
+
+| Dataset | e30 (v2) | e60 | e100 | e165 | e165 vs e30 |
+|---|---|---|---|---|---|
+| madelon† | 0.897 | 0.899 | 0.907 | 0.899 | 6-3, +0.002, p = 0.36 |
+| arcene† | 0.947 | 0.942 | 0.937 | 0.941 | 4-25, -0.006, p = 3e-4 |
+| RELATHE† | 0.948 | 0.836 | 0.773 | 0.786 | 0-30, -0.162, p = 2e-9 |
+| gisette† | 0.996 | 0.991 | 0.994 | 0.996 | 8-1, +0.001 |
+
+Longer training does not help, and the sensitivity to sparse text tables grows with it until the clip no longer
+covers it: the stage keeps learning something wrong for nearly empty columns, not only about extreme values (its
+parent w3000r1024 also fell between epochs 10 and 30, while the same stage widened to 5000 columns did not). The
+v2 stays at epoch 30. In fairness: epoch 30 was chosen on madelon and arcene before RELATHE was looked at, so
+landing before the degradation was partly luck. For the next model: widen to at least 5000 columns, add sparse
+columns to the widening, and watch RELATHE during training to stop a stage that degrades it.
+
+## Interpretability (2026-10-12)
+
+Feature importance is the attention of the label token to each feature, averaged over rows, heads and layers, as
+TabPFN-Wide (its Section 3.4, which follows Ye et al., 2025, for the averaging). Only the label's row of the
+attention is computed (`feature_attention_scores`), so memory grows with the number of features, not its
+square. Code: `tfmplayground/interpretability.py`, `experiments/interpretability_synthetic.py`,
+`experiments/interpretability_omics.py`. Our models add a fixed random vector per column position, so the
+columns are permuted (per seed or per fold) in every interpretability experiment: on fake data an untrained
+checkpoint otherwise looked perfectly stable across folds (top-100 Jaccard 0.95; 0.21, chance, once permuted).
+
+**Synthetic, with known answer** (TabPFN-Wide's Appendix F protocol: `make_classification`, 50 training samples,
+200-5000 features, 3/5/7 informative, 5 seeds; plus 200 held-out samples, so that each model's importance is read
+with its predictive AUROC). Importance AUROC = probability that an informative feature outscores a noise one:
+
+| Features | v2: test AUROC / importance | TabPFN-Wide | random forest | w5000 (v1) |
+|---|---|---|---|---|
+| 200 | 0.764 / 0.836 | 0.790 / 0.876 | 0.723 / 0.819 | 0.766 / 0.800 |
+| 500 | 0.739 / 0.819 | 0.751 / 0.838 | 0.681 / 0.796 | 0.753 / 0.800 |
+| 1000 | 0.707 / 0.850 | 0.722 / 0.806 | 0.646 / 0.777 | 0.724 / 0.826 |
+| 2000 | 0.692 / 0.817 | 0.701 / 0.804 | 0.609 / 0.770 | 0.716 / 0.796 |
+| 5000 | 0.696 / 0.827 | 0.686 / 0.819 | 0.577 / 0.685 | 0.717 / 0.805 |
+| All (75 tables) | 0.720 / 0.830 | 0.730 / 0.828 | 0.647 / 0.770 | 0.735 / 0.805 |
+
+Importance, v2 against: TabPFN-Wide 34-41, +0.001, p = 0.82 (tie; Wide better at 200-500 features, v2 at
+1000-5000); random forest 54-21, +0.060, p = 1e-5; w5000 54-21, +0.024, p = 7e-6. Importance follows prediction
+(Spearman between a table's test AUROC and its importance AUROC: 0.44 for the v2). A first version read the
+attention with the training rows as queries; it favoured TabPFN-Wide (0.803 against 0.781) and was replaced by
+the held-out protocol above.
+
+**MLOmics mRNA** (BRCA, COAD, GBM, LGG, OV; the benchmark's 5 folds). Each selector ranks the genes with the
+training rows only (fitted on 80%, attention read on the other 20%); a logistic regression, the same for every
+selector, is fitted on the top-k genes of the fold's training rows and scored on its test rows (COAD fold 0 left
+out: a class is missing from its test rows).
+
+| Top-k genes | v2 | TabPFN-Wide | w5000 | random forest | ANOVA | random | all genes |
+|---|---|---|---|---|---|---|---|
+| 10 | 0.944 | 0.936 | 0.934 | 0.941 | 0.930 | 0.797 | |
+| 50 | 0.967 | 0.964 | 0.961 | 0.955 | 0.952 | 0.906 | |
+| 100 | 0.970 | 0.966 | 0.965 | 0.965 | 0.961 | 0.934 | |
+| 500 | 0.976 | 0.975 | 0.976 | 0.974 | 0.971 | 0.961 | 0.967 |
+
+Averaging k = 10, 50, 100 per dataset and fold (24 pairs), the v2's genes are better than TabPFN-Wide's (17-7,
++0.005, p = 0.013), w5000's (18-6, p = 0.005) and ANOVA's (19-5, p = 0.002); against the random forest 17-7,
+p = 0.14 (it is strong at k = 10, weaker at 50). The v2's top 50 genes match all 14-18k genes (13-10, p = 0.63);
+its top 500 beat them (20-3, +0.008, p = 0.002).
+
+Stability of the top 100 across folds (Jaccard; Spearman over all genes): ANOVA 0.56/0.87, w5000 0.35/0.79, v2
+0.34/0.77, TabPFN-Wide 0.28/0.63, random forest 0.25/0.17. ANOVA is the most stable and the least useful. The v2
+and TabPFN-Wide share 35% of their top 100 (Spearman 0.73).
+
+BRCA's labels are PAM50 subtypes; PAM50 genes among the top 10 / 50 / 100 (mean over folds; 0.03 / 0.14 / 0.27
+expected by chance): v2 4.4 / 14.4 / 19.2, TabPFN-Wide 3.2 / 11.2 / 18.6, random forest 3.2 / 8.6 / 16.0,
+w5000 3.8 / 9.4 / 14.2, ANOVA 4.0 / 6.8 / 12.2. Top 10 genes of the v2 (mean score over folds): BRCA FOXC1, ESR1,
+CCDC170, C5AR2, FOXA1, SRSF12, KRT5, GABRP, CNTNAP3, SFRP1 (five PAM50 genes; SRSF12 is also in TabPFN-Wide's
+list); COAD MLH1, LOC105371814, KCNRG, ELAC1, EPM2AIP1, … (MLH1 first for every selector; EPM2AIP1 shares its
+promoter). The GBM, LGG and OV lists are still to be checked against the literature, as TabPFN-Wide did.
+
+Limits: one evaluator (logistic regression), mRNA only, effects in AUROC small (+0.005) though consistent.
+
+## Where each component comes from
+
+| From TabPFN v2 (Hollmann et al., 2025) | From TabPFN-Wide / Ye et al. (2025) | Ours |
+|---|---|---|
+| Missing-value indicator; random vector per column (ours fixed per position, seed 42, instead of resampled per inference) | Feature widening (continuous, Algorithm 1); label attention as feature importance (TabPFN-Wide); row embeddings from the label token with leave-one-fold-out for training rows (Ye et al.) | Categorical widening (Algorithm 2 implemented for mixed tables); bf16 inference; low-memory inference and the fix of the normal path above ~2^32 elements; label attention in memory linear in the features; feature clip ±10 justified against the prior; seeded, reproducible prior; training stages and their evaluation |
