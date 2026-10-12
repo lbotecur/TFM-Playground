@@ -46,6 +46,10 @@ PROBE_TEST_ROWS = 500
 DEV_FOLDER = "HDLSS_dev"
 DEV_DATASETS = ("GLIOMA", "lymphoma", "nci9", "lung_discrete", "warpPIE10P", "orlraws10P", "USPS")
 DEV_SPLITS, DEV_SEED, DEV_LARGE = 3, 42, 2500  # stratified 3-fold, 2 repeats (1 with DEV_LARGE rows or more)
+# Datasets of the HDLSS benchmark declared development datasets (marked † in the paper, used for decisions since
+# 2026-10-11): madelon (feature interactions), arcene (10,000 features, 200 rows) and RELATHE (sparse text, the
+# failure the clip fixed and that longer widening brings back). Read from <data_root>/HDLSS, same folds as above.
+BENCHMARK_DEV_DATASETS = ("madelon", "arcene", "RELATHE")
 
 
 def _seed_everything(seed: int):
@@ -114,7 +118,8 @@ def prior_metrics(model, tables: list[dict], device, amp_dtype=torch.bfloat16) -
     return {"loss": float(np.mean(loss)), "accuracy": float(np.mean(accuracy)), "baseline_loss": float(np.mean(baseline))}
 
 
-def prior_metrics_classifier(name: str, tables: list[dict], device) -> dict:
+def prior_metrics_classifier(name: str, tables: list[dict], device,
+                             feature_clip: float | None = None) -> dict:
     """Held-out prior loss of any model through its classifier interface (fit on the training rows, predict the
     test rows), so ours and other models are compared on the same tables. Only test rows whose class appears in
     the training rows count, since no classifier can give probability to a class it never saw. The reference
@@ -130,7 +135,8 @@ def prior_metrics_classifier(name: str, tables: list[dict], device) -> dict:
         seen = np.isin(y_test, y_train)
         if len(np.unique(y_train)) < 2 or not seen.any():
             continue
-        model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[])
+        model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[],
+                               feature_clip=feature_clip if ours else None)
         proba = predict_proba(model, x[:split], y_train, x[split:][seen])
         classes = np.unique(y_train)  # the column order of predict_proba for every model here
         p_true = proba[np.arange(seen.sum()), np.searchsorted(classes, y_test[seen])]
@@ -165,20 +171,30 @@ def dev_folds(y: np.ndarray):
     return list(cv.split(np.zeros(len(y)), y))
 
 
-def run_dev(name: str, device: str, data_root: str | Path, datasets=DEV_DATASETS) -> list[dict]:
+def run_dev(name: str, device: str, data_root: str | Path,
+            datasets=DEV_DATASETS + BENCHMARK_DEV_DATASETS, feature_clip: float | None = None) -> list[dict]:
     """AUROC and accuracy of model `name` on every fold of the development datasets (set 'dev_<dataset>', seed =
-    fold). Datasets whose file is missing are skipped."""
+    fold), including the HDLSS ones declared development (BENCHMARK_DEV_DATASETS). Datasets whose file is
+    missing are skipped."""
     from tfmplayground.benchmarks.metrics import accuracy, roc_auc
     from tfmplayground.benchmarks.models import is_checkpoint, make_model, predict_proba
 
     ours = is_checkpoint(name)
     rows = []
     for dataset in datasets:
-        if not (Path(data_root) / DEV_FOLDER / f"{dataset}.mat").exists():
+        if dataset in BENCHMARK_DEV_DATASETS:
+            from tfmplayground.benchmarks import hdlss
+
+            if not (Path(data_root) / hdlss.FOLDER / f"{dataset}.mat").exists():
+                continue
+            X, y, _ = hdlss.load_task(dataset, data_root)
+        elif (Path(data_root) / DEV_FOLDER / f"{dataset}.mat").exists():
+            X, y = load_dev_dataset(dataset, data_root)
+        else:
             continue
-        X, y = load_dev_dataset(dataset, data_root)
         for fold, (train, test) in enumerate(dev_folds(y)):
-            model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[])
+            model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[],
+                               feature_clip=feature_clip if ours else None)
             proba = predict_proba(model, X[train], y[train], X[test])
             rows += [{"set": f"dev_{dataset}", "seed": fold, "metric": "roc_auc", "value": roc_auc(y[test], proba)},
                      {"set": f"dev_{dataset}", "seed": fold, "metric": "accuracy", "value": accuracy(y[test], proba)}]
@@ -216,7 +232,8 @@ def probe_name(task: str, n_train: int, noise: int) -> str:
     return f"{task}_n{n_train}_noise{noise}"
 
 
-def run_probes(name: str, device: str, seeds: int = 5, probes=PROBES) -> list[dict]:
+def run_probes(name: str, device: str, seeds: int = 5, probes=PROBES,
+               feature_clip: float | None = None) -> list[dict]:
     """AUROC of model `name` (a checkpoint path or any make_model name) on every probe and seed."""
     from tfmplayground.benchmarks.models import is_checkpoint, make_model, predict_proba
 
@@ -225,7 +242,8 @@ def run_probes(name: str, device: str, seeds: int = 5, probes=PROBES) -> list[di
     for task, n_train, noise in probes:
         for seed in range(seeds):
             X_train, y_train, X_test, y_test = probe_data(task, n_train, noise, seed)
-            model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[])
+            model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[],
+                               feature_clip=feature_clip if ours else None)
             proba = predict_proba(model, X_train, y_train, X_test)
             rows.append({"set": probe_name(task, n_train, noise), "seed": seed, "metric": "roc_auc",
                          "value": roc_auc_score(y_test, proba[:, 1])})

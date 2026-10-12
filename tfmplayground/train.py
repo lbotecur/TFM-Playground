@@ -8,7 +8,7 @@ from pfns.bar_distribution import FullSupportBarDistribution
 from torch import nn
 from torch.utils.data import DataLoader
 
-from tfmplayground.augmentation import add_mixed_widening_features, inject_mcar_missingness
+from tfmplayground.augmentation import add_mixed_widening_features, inject_mcar_missingness, sparsify_columns
 from tfmplayground.callbacks import Callback
 from tfmplayground.models.nanotabpfn import NanoTabPFNModel
 from tfmplayground.normalization import compute_target_stats_torch, normalize_targets
@@ -30,6 +30,23 @@ class WideningConfig:
     include_original_prob: float = 0.5
     max_cats: int = 20
     prob_no_widening: float = 0.0  # fracción de batches sin widening (tablas estrechas)
+    # Rows kept in a widened batch (0 = all): narrow batches keep the prior's long tables (up to --max-rows),
+    # widened ones are shortened so that thousands of columns fit in memory (5000 x 1024 ran out of 80 GB).
+    max_rows: int = 0
+    # Probability that a widened batch gets sparse columns (see augmentation.sparsify_columns), and the
+    # largest share of its columns made sparse (drawn uniformly up to it).
+    sparse_columns_prob: float = 0.0
+    sparse_columns_max_fraction: float = 1.0
+
+def shorten_table(x: torch.Tensor, y: torch.Tensor, target_y: torch.Tensor, split: int, max_rows: int):
+    """Keeps max_rows rows of a batch, the same share of training rows (at least 2) and of test rows (at least
+    1). The prior draws rows independently, so the first rows of each part are a random subset of it."""
+    rows = x.shape[1]
+    n_train = min(max(2, round(split * max_rows / rows)), split, max_rows - 1)
+    n_test = min(max_rows - n_train, rows - split)
+    keep = torch.cat([torch.arange(n_train), torch.arange(split, split + n_test)])
+    return x[:, keep.to(x.device)], y[:, keep], target_y[:, keep], n_train
+
 
 def train(
     model: NanoTabPFNModel,
@@ -133,14 +150,20 @@ def train(
                 window_wait += time.time() - fetch_start
                 train_test_split_index = full_data["train_test_split_index"]
                 x = full_data["x"].to(device)
+                y_all, target_all = full_data["y"], full_data["target_y"]
                 # Feature widening (HDLSS prior): per batch, sample how many features to add and
                 # the sparsity/noise, then generate them per dataset (Algorithm 1 for continuous
                 # features, Algorithm 2 for categorical). No-op when disabled.
-                if (
+                widen = (
                     widening is not None
                     and widening.add_features_max > 0
                     and (widening.prob_no_widening == 0 or torch.rand(1).item() >= widening.prob_no_widening)
-                ):
+                )
+                if widen and widening.max_rows and x.shape[1] > widening.max_rows:
+                    x, y_all, target_all, train_test_split_index = shorten_table(
+                        x, y_all, target_all, int(train_test_split_index), widening.max_rows
+                    )
+                if widen:
                     num_add = int(
                         torch.randint(widening.add_features_min, widening.add_features_max + 1, (1,)).item()
                     )
@@ -154,18 +177,20 @@ def train(
                         max_cats=widening.max_cats,
                         include_original_prob=widening.include_original_prob,
                     )
+                    if widening.sparse_columns_prob > 0 and torch.rand(1).item() < widening.sparse_columns_prob:
+                        x = sparsify_columns(x, torch.rand(1).item() * widening.sparse_columns_max_fraction)
                 # Training-time MCAR augmentation: per batch, draw a rate ~ U(0, missing_rate_max)
                 # and set feature cells to NaN, so the model learns to use the missing indicator.
                 if missing_rate_max > 0:
                     rate = torch.rand(1, device=x.device).item() * missing_rate_max
                     x = inject_mcar_missingness(x, rate)
-                data = (x, full_data["y"][:, :train_test_split_index].to(device))
+                data = (x, y_all[:, :train_test_split_index].to(device))
                 # Only guard the targets: features with NaNs are handled by the model
                 # (normalize_features imputes them and flags them via the indicator channel),
                 # so dropping feature-NaN batches would throw away trainable missing signal.
                 if torch.isnan(data[1]).any():
                     continue
-                targets = full_data["target_y"].to(device)
+                targets = target_all.to(device)
 
                 if regression_task:
                     y_mean, y_std = compute_target_stats_torch(data[1])

@@ -370,3 +370,33 @@ def add_mixed_widening_features(
         widened.append(new_features)
 
     return torch.stack(widened, dim=0)
+
+def sparsify_columns(x: torch.Tensor, fraction: float, min_nonzero: float = 0.002, max_nonzero: float = 0.2,
+                     generator: torch.Generator | None = None) -> torch.Tensor:
+    """Turns a share `fraction` of the columns into sparse ones, as in bag-of-words text or single-cell counts:
+    each chosen column keeps only its highest values, shifted to start at 0, and is 0 elsewhere. The share of
+    nonzero rows per column is drawn log-uniformly in [min_nonzero, max_nonzero], so some values are rare (a
+    value present in a fraction p of the rows gets z ~ sqrt((1 - p) / p) once normalized). Being above a
+    threshold of the original value, a nonzero entry keeps the column's information (a zero is informative too,
+    as the absence of a word). Missing values stay missing. x: (batch, rows, features); returns a new tensor."""
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError(f"fraction must be in [0, 1], got {fraction}.")
+    b, n, f = x.shape
+    out = x.clone()
+    chosen = torch.rand(b, f, generator=generator) < fraction
+    log_lo, log_hi = torch.log(torch.tensor(min_nonzero)), torch.log(torch.tensor(max_nonzero))
+    keep = torch.exp(log_lo + (log_hi - log_lo) * torch.rand(b, f, generator=generator))  # share of nonzero rows
+    for i in range(b):
+        cols = torch.nonzero(chosen[i]).flatten()
+        if len(cols) == 0:
+            continue
+        values = x[i][:, cols].float()
+        # each column's (1 - keep) quantile, ignoring missing values (sorted last)
+        ordered = torch.sort(torch.nan_to_num(values, nan=float("inf")), dim=0).values
+        observed = (~torch.isnan(values)).sum(dim=0).clamp(min=1)
+        position = ((1 - keep[i, cols].to(values.device)) * (observed - 1)).floor().long()
+        thresholds = ordered.gather(0, position[None]).squeeze(0)
+        sparse = torch.where(values > thresholds, values - thresholds, torch.zeros_like(values))
+        sparse = torch.where(torch.isnan(values), values, sparse)
+        out[i][:, cols] = sparse.to(x.dtype)
+    return out
