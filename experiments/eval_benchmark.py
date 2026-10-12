@@ -2,7 +2,8 @@
 
 Datasets are "<benchmark>/<name>": mlomics/<BRCA|COAD|GBM|LGG|OV>/<omics joined with +>, hdlss/<name>
 (the 15 scikit-feature datasets in tfmplayground.benchmarks.hdlss.DATASETS), or shamir/<breast|gbm|sarcoma>/<omics
-joined with +, from mrna, methylation, mirna>.
+joined with +, from mrna, methylation, mirna>, or openml/<name> (the narrow OpenML-CC18 subset written by
+experiments/download_openml_cc18.py; openml/all for all of them).
 Models: our checkpoints (paths), random_forest, logreg, logreg_en, xgboost, tabpfn-wide-5k,
 tabpfn-v2-gn2p4bpt, tabpfn-3.5 (":n8" = 8 ensemble members, ":auto" = package default, 8 members fixed by
 the checkpoint, ":cover" = enough members, ceil(features / 768) and at least 8, for every feature to be seen).
@@ -44,8 +45,16 @@ parser.add_argument("--data-root", default=str(REPO.parent), help="folder that c
 args = parser.parse_args()
 
 os.chdir(REPO)
+datasets = []
+for spec in args.datasets:  # "openml/all": every downloaded dataset of the OpenML-CC18 subset
+    if spec == "openml/all":
+        from tfmplayground.benchmarks import openml_cc18
+
+        datasets += [f"openml/{name}" for name in openml_cc18.datasets(args.data_root)]
+    else:
+        datasets.append(spec)
 run_benchmark(
-    datasets=args.datasets,
+    datasets=datasets,
     models=args.models,
     output=args.output,
     data_root=args.data_root,
