@@ -77,18 +77,25 @@ def init_model_from_state_dict_file(file_path):
         feature_clip=state_dict["architecture"].get("feature_clip", LEGACY_FEATURE_CLIP),
     )
     model.load_state_dict(_migrate_state_dict(state_dict["model"]))
+    # how the model is meant to be used at inference: shuffle the columns once (see _column_order); checkpoints
+    # without the setting (the v2 and earlier) keep the preprocessor's order
+    model.permute_columns = bool(state_dict["architecture"].get("permute_columns", False))
     return model
 
 
-def export_checkpoint(source: str, destination: str, feature_clip: float | None = None) -> dict:
-    """Writes a release copy of a training checkpoint: architecture (with the feature clip the model is meant
-    to be used with) and weights, without the optimizer state. feature_clip=None keeps the source's own
-    (LEGACY_FEATURE_CLIP if it has none). Loading the copy with NanoTabPFNClassifier needs no other setting."""
+def export_checkpoint(source: str, destination: str, feature_clip: float | None = None,
+                      permute_columns: bool | None = None) -> dict:
+    """Writes a release copy of a training checkpoint: architecture (with the feature clip and the column
+    permutation the model is meant to be used with) and weights, without the optimizer state. None keeps the
+    source's own (LEGACY_FEATURE_CLIP and no permutation if it has none). Loading the copy with
+    NanoTabPFNClassifier needs no other setting."""
     state = torch.load(source, map_location="cpu", weights_only=False)
     architecture = dict(state["architecture"])
     architecture["feature_clip"] = float(
         architecture.get("feature_clip", LEGACY_FEATURE_CLIP) if feature_clip is None else feature_clip
     )
+    if permute_columns is not None:
+        architecture["permute_columns"] = bool(permute_columns)
     release = {"epoch": state.get("epoch"), "architecture": architecture, "model": state["model"],
                "source": str(source)}
     torch.save(release, destination)
@@ -102,14 +109,44 @@ def export_checkpoint(source: str, destination: str, feature_clip: float | None 
 LOW_MEMORY_AUTO_ELEMENTS = 2**31
 
 
-def _configure(estimator, model, feature_clip, low_memory):
-    """Shared by the classifier and the regressor: feature clip and low-memory mode."""
+def _configure(estimator, model, feature_clip, low_memory, permute_columns=None, column_seed=0):
+    """Shared by the classifier and the regressor: feature clip, low-memory mode and column permutation."""
     if feature_clip is not None:
         model.feature_encoder.clip = float(feature_clip)
+    estimator.permute_columns = (getattr(model, "permute_columns", False) if permute_columns is None
+                                 else bool(permute_columns))
+    estimator.column_seed = column_seed
     if low_memory not in (True, False, "auto"):
         raise ValueError(f"low_memory must be True, False or 'auto', got {low_memory!r}")
     estimator.low_memory = low_memory
     _set_low_memory(model, low_memory is True)
+
+
+def _column_order(num_columns: int, permute: bool, seed: int) -> np.ndarray:
+    """Order in which the preprocessed columns enter the model. The preprocessor puts the numeric columns first
+    and the categorical ones last, a fixed pattern that training tables never have (their columns are in random
+    order); with permute, one permutation fixed by the seed (deterministic, so attention scores are
+    reproducible). Without, the preprocessor's order."""
+    if not permute:
+        return np.arange(num_columns)
+    return np.random.default_rng(seed).permutation(num_columns)
+
+
+def _fit_columns(estimator, X_train):
+    """Fits the preprocessor on X_train and returns the preprocessed training rows, in the model's order."""
+    estimator.feature_preprocessor = get_feature_preprocessor(
+        X_train, categorical_features=estimator.categorical_features, infer_categorical=estimator.infer_categorical,
+        max_unique_for_categorical=estimator.max_unique_for_categorical,
+        min_samples_for_categorical_inference=estimator.min_samples_for_categorical_inference,
+    )
+    X = estimator.feature_preprocessor.fit_transform(X_train)
+    estimator.column_order_ = _column_order(X.shape[1], estimator.permute_columns, estimator.column_seed)
+    return X[:, estimator.column_order_]
+
+
+def _transform_columns(estimator, X_test):
+    """Preprocesses test rows as the training rows (same columns, same order)."""
+    return estimator.feature_preprocessor.transform(X_test)[:, estimator.column_order_]
 
 
 def _set_low_memory(model, on: bool):
@@ -254,6 +291,8 @@ class NanoTabPFNClassifier:
         amp_dtype: torch.dtype | None = None,
         low_memory: bool | str = True,
         feature_clip: float | None = None,
+        permute_columns: bool | None = None,
+        column_seed: int = 0,
     ):
         device = torch.device(get_default_device() if device is None else device)
         if model is None:
@@ -282,7 +321,9 @@ class NanoTabPFNClassifier:
         # path (identical in fp32, rounding differences in bf16), faster in our benchmarks, and correct on large
         # tables where the normal path is not. "auto" uses the normal path for small tables (see _run_model).
         # feature_clip: bound of the normalized features (see normalize_features); None keeps the checkpoint's own.
-        _configure(self, self.model, feature_clip, low_memory)
+        # permute_columns: shuffle the preprocessed columns once, with column_seed (see _column_order); None keeps
+        # the checkpoint's own setting (off for the v2 and earlier).
+        _configure(self, self.model, feature_clip, low_memory, permute_columns, column_seed)
 
     def fit(self, 
             X_train: np.ndarray | pd.DataFrame, 
@@ -291,12 +332,7 @@ class NanoTabPFNClassifier:
         """Stores X_train, label-encodes the targets to contiguous indices 0..num_classes-1
         (so arbitrary labels, e.g. non-contiguous integers or strings, are supported), and
         keeps the original labels in classes_ for decoding predictions"""
-        self.feature_preprocessor = get_feature_preprocessor(
-            X_train, categorical_features=self.categorical_features, infer_categorical=self.infer_categorical,
-            max_unique_for_categorical=self.max_unique_for_categorical,
-            min_samples_for_categorical_inference=self.min_samples_for_categorical_inference,
-        )
-        self.X_train = self.feature_preprocessor.fit_transform(X_train)
+        self.X_train = _fit_columns(self, X_train)
         self.label_encoder = LabelEncoder()
         self.y_train = self.label_encoder.fit_transform(y_train)
         self.classes_ = self.label_encoder.classes_
@@ -320,7 +356,7 @@ class NanoTabPFNClassifier:
         creates (x,y), runs it through our PyTorch Model, cuts off the classes that didn't appear in the training data
         and applies softmax to get the probabilities
         """
-        x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
+        x = np.concatenate((self.X_train, _transform_columns(self, X_test)))
         y = self.y_train
         with torch.no_grad():
             x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)  # introduce batch size 1
@@ -352,7 +388,7 @@ class NanoTabPFNClassifier:
         dropped as constant get NaN (the model never saw them). Requires fit() first and a model
         that exposes transformer_blocks.
         """
-        x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
+        x = np.concatenate((self.X_train, _transform_columns(self, X_test)))
         y = self.y_train
         blocks = self.model.transformer_blocks
         for block in blocks:
@@ -372,9 +408,10 @@ class NanoTabPFNClassifier:
                 block.feature_attention = None
         # map transformed columns ([num..., cat...]) back to original feature indices
         num_mask, cat_mask = self._feature_masks()
-        original_of_output = np.where(num_mask)[0].tolist() + np.where(cat_mask)[0].tolist()
+        original_of_output = np.asarray(np.where(num_mask)[0].tolist() + np.where(cat_mask)[0].tolist(), dtype=int)
         scores = np.full(num_mask.shape[0], np.nan)
-        scores[original_of_output] = attention_to_columns
+        # model position k holds preprocessed column column_order_[k]
+        scores[original_of_output[self.column_order_]] = attention_to_columns
         return scores
 
     def get_embeddings(self, X_test: np.ndarray) -> np.ndarray:
@@ -383,7 +420,7 @@ class NanoTabPFNClassifier:
         shape (n_test, embedding_size). For comparable TRAINING embeddings use the
         leave-one-fold-out extractor rather than embedding the training rows directly.
         """
-        x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
+        x = np.concatenate((self.X_train, _transform_columns(self, X_test)))
         y = self.y_train
         self.model.save_embeddings = True
         self.model.embeddings = None
@@ -415,6 +452,8 @@ class NanoTabPFNRegressor:
         amp_dtype: torch.dtype | None = None,
         low_memory: bool | str = True,
         feature_clip: float | None = None,
+        permute_columns: bool | None = None,
+        column_seed: int = 0,
     ):
         device = torch.device(get_default_device() if device is None else device)
         if model is None:
@@ -457,7 +496,9 @@ class NanoTabPFNRegressor:
         # path (identical in fp32, rounding differences in bf16), faster in our benchmarks, and correct on large
         # tables where the normal path is not. "auto" uses the normal path for small tables (see _run_model).
         # feature_clip: bound of the normalized features (see normalize_features); None keeps the checkpoint's own.
-        _configure(self, self.model, feature_clip, low_memory)
+        # permute_columns: shuffle the preprocessed columns once, with column_seed (see _column_order); None keeps
+        # the checkpoint's own setting (off for the v2 and earlier).
+        _configure(self, self.model, feature_clip, low_memory, permute_columns, column_seed)
 
     def fit(self, 
             X_train:np.ndarray | pd.DataFrame, 
@@ -467,12 +508,7 @@ class NanoTabPFNRegressor:
         Stores X_train and y_train for later use.
         Computes target normalization.
         """
-        self.feature_preprocessor = get_feature_preprocessor(
-            X_train, categorical_features=self.categorical_features, infer_categorical=self.infer_categorical,
-            max_unique_for_categorical=self.max_unique_for_categorical,
-            min_samples_for_categorical_inference=self.min_samples_for_categorical_inference,
-        )
-        self.X_train = self.feature_preprocessor.fit_transform(X_train)
+        self.X_train = _fit_columns(self, X_train)
         self.y_train = y_train
 
         self.y_train_mean, self.y_train_std = compute_target_stats_numpy(self.y_train)
@@ -485,7 +521,7 @@ class NanoTabPFNRegressor:
         Predicts the means of the output distributions for X_test.
         Renormalizes the predictions back to the original target scale.
         """
-        X = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
+        X = np.concatenate((self.X_train, _transform_columns(self, X_test)))
         y = self.y_train_n
 
         with torch.no_grad():
@@ -505,7 +541,7 @@ class NanoTabPFNRegressor:
         shape (n_test, embedding_size). For comparable TRAINING embeddings use the
         leave-one-fold-out extractor rather than embedding the training rows directly.
         """
-        x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
+        x = np.concatenate((self.X_train, _transform_columns(self, X_test)))
         y = self.y_train_n
         self.model.save_embeddings = True
         self.model.embeddings = None

@@ -40,6 +40,9 @@ parser.add_argument("--low-memory", action=argparse.BooleanOptionalAction, defau
 parser.add_argument("--feature-clip", type=float, default=None,
                     help="our checkpoints: bound of the normalized features (default: the checkpoint's own, 100 "
                          "for every checkpoint saved before it was configurable); labelled e.g. [clip10]")
+parser.add_argument("--permute-columns", action=argparse.BooleanOptionalAction, default=None,
+                    help="our checkpoints: shuffle the columns once with a fixed seed, or not (default: the "
+                         "checkpoint's own setting, off for the v2 and earlier); labelled [permuted]/[not permuted]")
 parser.add_argument("--output", default="workdir/eval/benchmarks.csv")
 parser.add_argument("--data-root", default=str(REPO.parent), help="folder that contains each benchmark's data")
 args = parser.parse_args()
@@ -63,4 +66,5 @@ run_benchmark(
     amp_dtype=torch.bfloat16 if args.bf16 else None,
     low_memory=args.low_memory,
     feature_clip=args.feature_clip,
+    permute_columns=args.permute_columns,
 )

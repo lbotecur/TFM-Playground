@@ -127,14 +127,16 @@ def _linear_inputs(categorical):
 
 
 def make_model(name: str, device: str = "cuda", amp_dtype=None, categorical: list[int] | None = None,
-               low_memory: bool | str = True, feature_clip: float | None = None):
+               low_memory: bool | str = True, feature_clip: float | None = None,
+               permute_columns: bool | None = None):
     """Baselines (BASELINES), other foundation models (EXTERNAL) or, for any other name, the path of one
     of our checkpoints, evaluated with NanoTabPFNClassifier without ensembling (one forward pass), as
     TabPFN-Wide evaluates its own model; "<path>@ctx300" wraps it in ContextChunks(max_rows=300). amp_dtype (e.g. torch.bfloat16) only applies to our checkpoints.
     categorical: indices of the categorical columns ([] = all numeric). None keeps each model's own
     automatic detection (what the first MLOmics evaluations used). low_memory and feature_clip only apply to our
     checkpoints (see NanoTabPFNClassifier): low_memory True (default) / False forces the mode, "auto" uses it for
-    large tables only; feature_clip bounds the normalized features (None keeps the checkpoint's own)."""
+    large tables only; feature_clip bounds the normalized features (None keeps the checkpoint's own);
+    permute_columns shuffles the columns once with a fixed seed (None keeps the checkpoint's own setting)."""
     if name == "random_forest":  # as TabPFN-Wide: default hyperparameters, NaN imputed with the mode
         return make_pipeline(SimpleImputer(strategy="most_frequent"), RandomForestClassifier(n_jobs=-1))
     if name == "logreg":
@@ -184,11 +186,12 @@ def make_model(name: str, device: str = "cuda", amp_dtype=None, categorical: lis
     path, max_rows = parse_checkpoint(name)
     if categorical is None:
         model = NanoTabPFNClassifier(model=path, device=device, amp_dtype=amp_dtype, low_memory=low_memory,
-                                     feature_clip=feature_clip)
+                                     feature_clip=feature_clip, permute_columns=permute_columns)
     else:  # Declared types only: without this, numeric columns with few distinct values (e.g. copy-number
         # levels, or genes with many zeros) would be inferred categorical.
         model = NanoTabPFNClassifier(model=path, device=device, amp_dtype=amp_dtype, low_memory=low_memory,
-                                     feature_clip=feature_clip, categorical_features=list(categorical),
+                                     feature_clip=feature_clip, permute_columns=permute_columns,
+                                     categorical_features=list(categorical),
                                      infer_categorical=False)
     return ContextChunks(model, max_rows) if max_rows else model
 

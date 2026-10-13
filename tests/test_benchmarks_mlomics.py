@@ -150,7 +150,8 @@ def test_low_memory_label_only_for_our_checkpoints(tmp_path, monkeypatch):
     seen = []
     real = runner.make_model
 
-    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None):
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None,
+            permute_columns=None):
         seen.append((name, low_memory, feature_clip))
         return real("random_forest", "cpu")
 
@@ -168,7 +169,8 @@ def test_without_low_memory_our_checkpoints_use_auto_and_keep_their_label(tmp_pa
     seen = []
     real = runner.make_model
 
-    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None):
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None,
+            permute_columns=None):
         seen.append((name, low_memory))
         return real("random_forest", "cpu")
 
@@ -186,7 +188,8 @@ def test_low_memory_is_the_default_of_the_runner(tmp_path, monkeypatch):
     seen = []
     real = runner.make_model
 
-    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None):
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None,
+            permute_columns=None):
         seen.append((name, low_memory))
         return real("random_forest", "cpu")
 
@@ -203,7 +206,8 @@ def test_feature_clip_label_and_value_only_for_our_checkpoints(tmp_path, monkeyp
     seen = []
     real = runner.make_model
 
-    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None):
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None,
+            permute_columns=None):
         seen.append((name, feature_clip))
         return real("random_forest", "cpu")
 
@@ -212,6 +216,25 @@ def test_feature_clip_label_and_value_only_for_our_checkpoints(tmp_path, monkeyp
                                device="cpu", low_memory=True, feature_clip=10.0)
     assert set(res.model) == {"ckpt.pth [low-memory] [clip10]", "random_forest"}
     assert ("ckpt.pth", 10.0) in seen and ("random_forest", None) in seen
+
+
+def test_permute_columns_label_and_value_only_for_our_checkpoints(tmp_path, monkeypatch):
+    from tfmplayground.benchmarks import runner
+
+    _fake_mlomics(tmp_path / mlomics.FOLDER)
+    seen = []
+    real = runner.make_model
+
+    def spy(name, device, amp_dtype=None, categorical=None, low_memory="auto", feature_clip=None,
+            permute_columns=None):
+        seen.append((name, permute_columns))
+        return real("random_forest", "cpu")
+
+    monkeypatch.setattr(runner, "make_model", spy)
+    res = runner.run_benchmark(["mlomics/BRCA/mrna"], ["ckpt.pth", "random_forest"], tmp_path / "r.csv", tmp_path,
+                               device="cpu", low_memory=True, permute_columns=True)
+    assert set(res.model) == {"ckpt.pth [low-memory] [permuted]", "random_forest"}
+    assert ("ckpt.pth", True) in seen and ("random_forest", None) in seen
 
 
 def test_paired_leaves_out_nan_folds():

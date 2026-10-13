@@ -106,6 +106,7 @@ def run_benchmark(
     amp_dtype=None,
     low_memory: bool = True,
     feature_clip: float | None = None,
+    permute_columns: bool | None = None,
 ) -> pd.DataFrame:
     """Evaluates every model on every dataset ("<benchmark>/<name>", e.g. "mlomics/BRCA/mrna+cnv") and
     feature count (0 = all; otherwise feature agglomeration, only for all-numeric data), with the folds
@@ -115,7 +116,9 @@ def run_benchmark(
     in low-memory inference and are labelled "[low-memory]" too. low_memory=False uses low_memory="auto"
     (the normal path except for tables too large for it, see LOW_MEMORY_AUTO_ELEMENTS), unlabelled, as the
     runs before low-memory became the default, so both versions can be compared fold by fold. feature_clip
-    overrides their checkpoint's feature clip (see normalize_features) and is labelled too, e.g. "[clip10]"."""
+    overrides their checkpoint's feature clip (see normalize_features) and is labelled too, e.g. "[clip10]";
+    permute_columns overrides their column permutation (see NanoTabPFNClassifier), labelled "[permuted]" or
+    "[not permuted]"."""
     output = Path(output)
     results = pd.read_csv(output) if output.exists() else pd.DataFrame(columns=RESULT_COLUMNS)
     for spec in datasets:
@@ -139,6 +142,8 @@ def run_benchmark(
                     label = f"{label} [low-memory]"
                 if ours and feature_clip is not None:
                     label = f"{label} [clip{feature_clip:g}]"
+                if ours and permute_columns is not None:
+                    label = f"{label} [{'permuted' if permute_columns else 'not permuted'}]"
                 done = set(results[(results.benchmark == benchmark) & (results.dataset == name)
                                    & (results.n_features == X.shape[1]) & (results.model == label)].fold)
                 for i, (train_idx, test_idx) in enumerate(folds):
@@ -147,7 +152,8 @@ def run_benchmark(
                     start = time.time()
                     model = make_model(model_name, device, amp_dtype if ours else None, categorical=categorical,
                                        low_memory=True if (low_memory and ours) else "auto",
-                                       feature_clip=feature_clip if ours else None)
+                                       feature_clip=feature_clip if ours else None,
+                                       permute_columns=permute_columns if ours else None)
                     proba = predict_proba(model, X[train_idx], y[train_idx], X[test_idx])
                     row = {"benchmark": benchmark, "dataset": name, "n_features": X.shape[1], "model": label,
                            "fold": i, "accuracy": accuracy(y[test_idx], proba), "roc_auc": roc_auc(y[test_idx], proba),

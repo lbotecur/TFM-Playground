@@ -68,8 +68,12 @@ The model never receives the column types: in both paths it sees numbers only.
    tables are TabICL's before its two steps (tests/test_graph_raw_prior.py), so the only change is the one
    intended: heavy tails reach the model as at inference, and no test rows are used to normalize.
 3. Inference: putting the categorical columns last is not out of distribution (training columns are in random
-   order and the column vectors do not encode the type), but it is a fixed pattern; an optional fixed-seed
-   column permutation is planned (off for v2, so the paper numbers do not change).
+   order and the column vectors do not encode the type), but it is a fixed pattern. `permute_columns=True` in
+   NanoTabPFNClassifier/Regressor (or `--permute-columns` in eval_benchmark.py and validate_run.py) shuffles the
+   preprocessed columns once with a fixed seed (`column_seed`, default 0), so a single forward pass stays
+   deterministic and attention scores are mapped back to the original columns. It is off for checkpoints
+   without the setting (the v2 and earlier, so the paper numbers do not change); `export_checkpoint(...,
+   permute_columns=True)` stores it in a release, so the v3 models will use it by default.
 
 Usage: `--prior-type graph_scm_raw` in `experiments/pretrain.py` (the graph_scm options apply). Not used by any
 run yet; the next base model (long narrow training with variable rows, then widening, then a low-lr stage)
