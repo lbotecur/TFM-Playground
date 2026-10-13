@@ -83,6 +83,12 @@ parser.add_argument("--multi-gpu", action="store_true",
 parser.add_argument("--no-log-seq-len", action="store_true",
                     help="rows per table uniform in [min-rows, max-rows] instead of log-uniform")
 args = parser.parse_args()
+# TabICL's graph generation depends on Python's string hashing (set and dict order), which is randomized per
+# process unless PYTHONHASHSEED is fixed: with the same --seed, two launches gave different tables. With a seed,
+# restart this process once with PYTHONHASHSEED set, so the tables are the same in every launch.
+if args.seed is not None and os.environ.get("PYTHONHASHSEED") != str(args.seed):
+    os.environ["PYTHONHASHSEED"] = str(args.seed)
+    os.execv(sys.executable, sys.orig_argv)  # orig_argv keeps the interpreter flags (-u)
 if args.prior_type == "omics":
     args.add_features_max = 0  # el prior ómico ya ensancha; train() no vuelve a ensanchar
 
