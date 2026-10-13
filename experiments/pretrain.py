@@ -37,7 +37,7 @@ from tfmplayground.train import WideningConfig, train
 parser = argparse.ArgumentParser()
 parser.add_argument("--run-name", required=True)
 parser.add_argument("--gpu", type=int, default=0)
-parser.add_argument("--prior-type", default="mlp_scm")  # mlp_scm, mix_scm, tree_scm, graph_scm, omics
+parser.add_argument("--prior-type", default="mlp_scm")  # mlp_scm, mix_scm, tree_scm, graph_scm, graph_scm_raw, omics
 parser.add_argument("--min-features", type=int, default=50)
 parser.add_argument("--max-features", type=int, default=350)
 parser.add_argument("--min-rows", type=int, default=40)
@@ -83,6 +83,12 @@ parser.add_argument("--multi-gpu", action="store_true",
 parser.add_argument("--no-log-seq-len", action="store_true",
                     help="rows per table uniform in [min-rows, max-rows] instead of log-uniform")
 args = parser.parse_args()
+# TabICL's graph generation depends on Python's string hashing (set and dict order), which is randomized per
+# process unless PYTHONHASHSEED is fixed: with the same --seed, two launches gave different tables. With a seed,
+# restart this process once with PYTHONHASHSEED set, so the tables are the same in every launch.
+if args.seed is not None and os.environ.get("PYTHONHASHSEED") != str(args.seed):
+    os.environ["PYTHONHASHSEED"] = str(args.seed)
+    os.execv(sys.executable, sys.orig_argv)  # orig_argv keeps the interpreter flags (-u)
 if args.prior_type == "omics":
     args.add_features_max = 0  # el prior ómico ya ensancha; train() no vuelve a ensanchar
 

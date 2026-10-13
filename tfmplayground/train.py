@@ -169,6 +169,9 @@ def train(
                     )
                     sparsity = torch.rand(1).item() * widening.sparsity_max
                     noise = torch.rand(1).item() * widening.noise_max
+                    # graph_scm_raw gives the categorical columns (codes 0..K-1): use them instead of guessing,
+                    # and give the new categorical columns such codes too, as at inference
+                    categorical_masks = full_data.get("categorical_mask")
                     x = add_mixed_widening_features(
                         x,
                         num_add,
@@ -176,6 +179,8 @@ def train(
                         noise,
                         max_cats=widening.max_cats,
                         include_original_prob=widening.include_original_prob,
+                        categorical_masks=categorical_masks,
+                        recode_categoricals=categorical_masks is not None,
                     )
                     if widening.sparse_columns_prob > 0 and torch.rand(1).item() < widening.sparse_columns_prob:
                         x = sparsify_columns(x, torch.rand(1).item() * widening.sparse_columns_max_fraction)
