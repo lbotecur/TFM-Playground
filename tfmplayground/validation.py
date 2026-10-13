@@ -172,7 +172,8 @@ def dev_folds(y: np.ndarray):
 
 
 def run_dev(name: str, device: str, data_root: str | Path,
-            datasets=DEV_DATASETS + BENCHMARK_DEV_DATASETS, feature_clip: float | None = None) -> list[dict]:
+            datasets=DEV_DATASETS + BENCHMARK_DEV_DATASETS, feature_clip: float | None = None,
+            permute_columns: bool | None = None) -> list[dict]:
     """AUROC and accuracy of model `name` on every fold of the development datasets (set 'dev_<dataset>', seed =
     fold), including the HDLSS ones declared development (BENCHMARK_DEV_DATASETS). Datasets whose file is
     missing are skipped."""
@@ -194,7 +195,8 @@ def run_dev(name: str, device: str, data_root: str | Path,
             continue
         for fold, (train, test) in enumerate(dev_folds(y)):
             model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[],
-                               feature_clip=feature_clip if ours else None)
+                               feature_clip=feature_clip if ours else None,
+                               permute_columns=permute_columns if ours else None)
             proba = predict_proba(model, X[train], y[train], X[test])
             rows += [{"set": f"dev_{dataset}", "seed": fold, "metric": "roc_auc", "value": roc_auc(y[test], proba)},
                      {"set": f"dev_{dataset}", "seed": fold, "metric": "accuracy", "value": accuracy(y[test], proba)}]
@@ -233,7 +235,7 @@ def probe_name(task: str, n_train: int, noise: int) -> str:
 
 
 def run_probes(name: str, device: str, seeds: int = 5, probes=PROBES,
-               feature_clip: float | None = None) -> list[dict]:
+               feature_clip: float | None = None, permute_columns: bool | None = None) -> list[dict]:
     """AUROC of model `name` (a checkpoint path or any make_model name) on every probe and seed."""
     from tfmplayground.benchmarks.models import is_checkpoint, make_model, predict_proba
 
@@ -243,7 +245,8 @@ def run_probes(name: str, device: str, seeds: int = 5, probes=PROBES,
         for seed in range(seeds):
             X_train, y_train, X_test, y_test = probe_data(task, n_train, noise, seed)
             model = make_model(name, device, torch.bfloat16 if ours else None, categorical=[],
-                               feature_clip=feature_clip if ours else None)
+                               feature_clip=feature_clip if ours else None,
+                               permute_columns=permute_columns if ours else None)
             proba = predict_proba(model, X_train, y_train, X_test)
             rows.append({"set": probe_name(task, n_train, noise), "seed": seed, "metric": "roc_auc",
                          "value": roc_auc_score(y_test, proba[:, 1])})

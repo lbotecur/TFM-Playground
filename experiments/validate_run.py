@@ -48,6 +48,9 @@ parser.add_argument("--reference", type=int, default=0,
 parser.add_argument("--feature-clip", type=float, default=None,
                     help="our checkpoints: feature clip to evaluate with (default: each checkpoint's own; 10 shows "
                          "runs trained with 100, such as v2.5, as the v2 is used)")
+parser.add_argument("--permute-columns", action=argparse.BooleanOptionalAction, default=None,
+                    help="our checkpoints, development datasets and probes: shuffle the columns once with a fixed "
+                         "seed, or not (default: the checkpoint's own setting, off for checkpoints without it)")
 parser.add_argument("--watch", type=float, default=0, help="minutes between looks for new checkpoints (0 = once)")
 args = parser.parse_args()
 device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
@@ -119,12 +122,14 @@ def evaluate(name: str, done: set):
     if not args.skip_dev:
         todo = [d for d in DEV_DATASETS + BENCHMARK_DEV_DATASETS if (name, f"dev_{d}", 0) not in done]
         if todo:
-            rows = run_dev(name, device, args.data_root, todo, feature_clip=args.feature_clip)
+            rows = run_dev(name, device, args.data_root, todo, feature_clip=args.feature_clip,
+                           permute_columns=args.permute_columns)
             save([{**base, "kind": "dev", **r} for r in rows])
     if not args.skip_probes:
         todo = [p for p in PROBES if any((name, probe_name(*p), s) not in done for s in range(args.seeds))]
         if todo:
-            rows = run_probes(name, device, args.seeds, todo, feature_clip=args.feature_clip)
+            rows = run_probes(name, device, args.seeds, todo, feature_clip=args.feature_clip,
+                              permute_columns=args.permute_columns)
             save([{**base, "kind": "probe", **r} for r in rows])
     print(f"{time.strftime('%H:%M')} validated {name}", flush=True)
 
