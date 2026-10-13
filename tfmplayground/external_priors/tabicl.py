@@ -141,16 +141,20 @@ class TabICLPriorDataLoader(DataLoader):
     def pd(self):
         """The TabICL prior(s) of this process: one PriorDataset per prior type."""
         if self._priors is None:
-            self._priors = [
-                TabICLPriorDataset(
-                    prior_type=t, config=graph_prior_config(*self.graph_config) if t == "graph_scm" else None,
-                    **self._kwargs,
-                )
-                for t in self.prior_types
-            ]
+            self._priors = [self._make_prior(t) for t in self.prior_types]
         if not isinstance(self._priors, list):  # replaced by a test
             return self._priors
         return self._priors[0] if len(self._priors) == 1 else self._priors
+
+    def _make_prior(self, prior_type: str):
+        """graph_scm_raw: graph_scm tables without TabICL's clamp and z-score, with their categorical masks
+        (see graph_raw.py); every other type is tabicl's PriorDataset."""
+        if prior_type == "graph_scm_raw":
+            from tfmplayground.external_priors.graph_raw import RawGraphPriorDataset
+
+            return RawGraphPriorDataset(config=graph_prior_config(*self.graph_config), **self._kwargs)
+        config = graph_prior_config(*self.graph_config) if prior_type == "graph_scm" else None
+        return TabICLPriorDataset(prior_type=prior_type, config=config, **self._kwargs)
 
     @pd.setter
     def pd(self, value):  # tests replace the generator with a fixed list of raw batches
@@ -163,7 +167,8 @@ class TabICLPriorDataLoader(DataLoader):
         return next(random.choices(priors, weights=self.prior_weights)[0])
 
     def tabicl_to_ours(self, d, to_device: bool = True):
-        x, y, active_features, seqlen, train_size = d
+        x, y, active_features, seqlen, train_size = d[:5]
+        categorical = d[5] if len(d) > 5 else None  # graph_scm_raw only
         # Datasets in a batch can keep different numbers of features after TabICL drops the constant
         # ones (the rest is zero padding). Keep up to the widest, so no dataset loses real features.
         active_features = int(active_features.max().item())
@@ -173,24 +178,26 @@ class TabICLPriorDataLoader(DataLoader):
         # the train labels (pad_targets), so hand float targets to train() for every prior type.
         y = y.float()
         device = self.device if to_device else torch.device("cpu")
-        return dict(
+        batch = dict(
             x=x.to(device),
             y=y.to(device),
             target_y=y.to(device),
             train_test_split_index=train_test_split_index,
         )
+        if categorical is not None:
+            batch["categorical_mask"] = categorical[:, :active_features].to(device)
+        return batch
 
     def _next_valid_batch(self, to_device: bool = True):
         """Draws TabICL batches until one has at least one usable dataset, and drops the unusable
         ones: datasets left without features (TabICL removed them all as constant) or marked as
         failed (labels -100). Either would crash or corrupt training."""
         while True:
-            x, y, active_features, seqlen, train_size = self._draw()
+            batch = self._draw()  # 5 tensors, plus the categorical masks for graph_scm_raw
+            x, y, active_features = batch[:3]
             keep = (active_features > 0) & (y.reshape(y.shape[0], -1).min(dim=1).values >= 0)
             if keep.any():
-                return self.tabicl_to_ours(
-                    (x[keep], y[keep], active_features[keep], seqlen[keep], train_size[keep]), to_device
-                )
+                return self.tabicl_to_ours(tuple(t[keep] for t in batch), to_device)
 
     def __iter__(self):
         if getattr(self, "seed", None) is not None:

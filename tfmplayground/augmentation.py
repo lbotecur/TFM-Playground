@@ -293,6 +293,8 @@ def add_mixed_widening_features(
     include_original_prob: float = 0.5,
     max_unique_for_categorical: int = 20,
     generator: torch.Generator | None = None,
+    categorical_masks: torch.Tensor | None = None,
+    recode_categoricals: bool = False,
 ) -> torch.Tensor:
     """Mixed continuous + categorical feature widening, applied per dataset (TabPFN-Wide).
 
@@ -316,6 +318,10 @@ def add_mixed_widening_features(
         include_original_prob: probability of appending originals and permuting (once, batch-wide).
         max_unique_for_categorical: categorical detection threshold (paper: <= 20).
         generator: optional torch.Generator for reproducibility.
+        categorical_masks: (batch_size, num_features) booleans, True on the categorical columns, when the prior
+            knows them (graph_scm_raw); None = detect them (<= max_unique_for_categorical distinct values).
+        recode_categoricals: give each new categorical column the codes 0..K-1 (in a random order), as an
+            ordinal encoder gives them at inference; for priors whose categorical columns are such codes.
 
     Returns:
         A new tensor of shape (batch_size, num_samples, width), where width is
@@ -342,7 +348,10 @@ def add_mixed_widening_features(
     widened = []
     for b in range(x.shape[0]):
         xb = x[b]  # (num_samples, num_features)
-        cat_mask = detect_categorical_mask(xb, max_unique=max_unique_for_categorical)
+        if categorical_masks is not None:
+            cat_mask = categorical_masks[b].to(device=x.device, dtype=torch.bool)
+        else:
+            cat_mask = detect_categorical_mask(xb, max_unique=max_unique_for_categorical)
         num_cont_to_add, num_cat_to_add = split_widening_budget(cat_mask, num_features_to_add)
 
         blocks = []
@@ -356,11 +365,12 @@ def add_mixed_widening_features(
             )
         if num_cat_to_add > 0:
             x_cat = xb[:, cat_mask]
-            blocks.append(
-                add_categorical_widening_features(
-                    x_cat, num_cat_to_add, sparsity, max_cats=max_cats, generator=generator,
-                )
+            new_cat = add_categorical_widening_features(
+                x_cat, num_cat_to_add, sparsity, max_cats=max_cats, generator=generator,
             )
+            if recode_categoricals:
+                new_cat = torch.stack([recode_categories(c, generator) for c in new_cat.T], dim=1)
+            blocks.append(new_cat)
         new_features = torch.cat(blocks, dim=-1)  # (num_samples, num_features_to_add)
 
         if include_original:
@@ -370,6 +380,17 @@ def add_mixed_widening_features(
         widened.append(new_features)
 
     return torch.stack(widened, dim=0)
+
+def recode_categories(col: torch.Tensor, generator: torch.Generator | None = None) -> torch.Tensor:
+    """Maps the K distinct values of a categorical column to the codes 0..K-1 in a random order (an ordinal
+    encoder's codes are in an arbitrary order too, e.g. alphabetical). Missing values stay missing."""
+    out = col.clone()
+    present = ~torch.isnan(col)
+    values, inverse = torch.unique(col[present], return_inverse=True)
+    codes = torch.randperm(len(values), generator=generator).to(col.device)
+    out[present] = codes[inverse].to(col.dtype)
+    return out
+
 
 def sparsify_columns(x: torch.Tensor, fraction: float, min_nonzero: float = 0.002, max_nonzero: float = 0.2,
                      generator: torch.Generator | None = None) -> torch.Tensor:

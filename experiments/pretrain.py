@@ -37,7 +37,7 @@ from tfmplayground.train import WideningConfig, train
 parser = argparse.ArgumentParser()
 parser.add_argument("--run-name", required=True)
 parser.add_argument("--gpu", type=int, default=0)
-parser.add_argument("--prior-type", default="mlp_scm")  # mlp_scm, mix_scm, tree_scm, graph_scm, omics
+parser.add_argument("--prior-type", default="mlp_scm")  # mlp_scm, mix_scm, tree_scm, graph_scm, graph_scm_raw, omics
 parser.add_argument("--min-features", type=int, default=50)
 parser.add_argument("--max-features", type=int, default=350)
 parser.add_argument("--min-rows", type=int, default=40)
