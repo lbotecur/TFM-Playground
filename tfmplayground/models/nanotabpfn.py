@@ -25,16 +25,24 @@ class NanoTabPFNModel(nn.Module):
         num_layers: int,
         num_outputs: int,
         feature_clip: float = DEFAULT_FEATURE_CLIP,
+        norm: str = "layer",
+        mlp_topk: float = 0.0,
     ):
         """Initializes the feature/target encoder, transformer blocks and decoder. feature_clip: normalized
         feature values are clipped to [-feature_clip, feature_clip] (see normalize_features); it is not a
-        weight, so it lives in feature_encoder.clip and in the checkpoint's architecture."""
+        weight, so it lives in feature_encoder.clip and in the checkpoint's architecture. norm: "layer"
+        (LayerNorm, every model before 2026-10) or "rms" (RMSNorm: no mean subtraction and no bias, so a zero
+        stays zero, as weight-sparse models need, see tfmplayground/sparsity.py). mlp_topk: if > 0, the MLP of
+        every block keeps only this fraction of its hidden activations, the largest in magnitude (AbsTopK); 0 =
+        all, as before."""
         super().__init__()
         self.embedding_size = embedding_size
         self.num_attention_heads = num_attention_heads
         self.mlp_hidden_size = mlp_hidden_size
         self.num_layers = num_layers
         self.num_outputs = num_outputs
+        self.norm = norm
+        self.mlp_topk = mlp_topk
         self.feature_encoder = FeatureEncoder(embedding_size, clip=feature_clip)
         # Projects a fixed random vector per feature column into the embedding space (TabPFNv2's
         # "subspace" feature positional embedding), see add_column_embeddings.
@@ -43,7 +51,8 @@ class NanoTabPFNModel(nn.Module):
         self.transformer_blocks = nn.ModuleList()
         for _ in range(num_layers):
             self.transformer_blocks.append(
-                TransformerEncoderLayer(embedding_size, num_attention_heads, mlp_hidden_size)
+                TransformerEncoderLayer(embedding_size, num_attention_heads, mlp_hidden_size, norm=norm,
+                                        mlp_topk=mlp_topk)
             )
         self.decoder = Decoder(embedding_size, mlp_hidden_size, num_outputs)
 
@@ -286,8 +295,15 @@ class TransformerEncoderLayer(nn.Module):
         batch_first: bool = True,
         device=None,
         dtype=None,
+        norm: str = "layer",
+        mlp_topk: float = 0.0,
     ):
         super().__init__()
+        if norm not in ("layer", "rms"):
+            raise ValueError(f"norm must be 'layer' or 'rms', got {norm!r}")
+        Norm = LayerNorm if norm == "layer" else nn.RMSNorm  # noqa: N806
+        # hidden activations kept by the MLP (AbsTopK), 0 = all
+        self.mlp_keep = round(mlp_topk * mlp_hidden_size) if mlp_topk > 0 else 0
         self.self_attention_between_datapoints = MultiheadAttention(
             embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype
         )
@@ -298,9 +314,9 @@ class TransformerEncoderLayer(nn.Module):
         self.linear1 = Linear(embedding_size, mlp_hidden_size, device=device, dtype=dtype)
         self.linear2 = Linear(mlp_hidden_size, embedding_size, device=device, dtype=dtype)
 
-        self.norm1 = LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
-        self.norm2 = LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
-        self.norm3 = LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm1 = Norm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm2 = Norm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm3 = Norm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
 
         # Opt-in interpretability: when save_feature_attention is True, forward stores the
         # target column's attention to every feature (averaged over samples and heads) in
@@ -408,13 +424,23 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(num_mem_chunks)
         def mlp(x):
-            return norm_in_chunk(self.norm3, self.linear2(F.gelu(self.linear1(x))) + x, x)
+            hidden = F.gelu(self.linear1(x))
+            if self.mlp_keep:
+                hidden = abs_topk(hidden, self.mlp_keep)
+            return norm_in_chunk(self.norm3, self.linear2(hidden) + x, x)
 
         src = mlp(src)
         src = src.reshape(batch_size, rows_size, col_size, embedding_size)
         if not low_memory:
             src = self.norm3(src)
         return src
+
+
+def abs_topk(x: torch.Tensor, k: int) -> torch.Tensor:
+    """Keeps the k entries of largest magnitude along the last dimension and zeroes the rest (AbsTopK, Gao et al.
+    2025)."""
+    threshold = x.abs().topk(k, dim=-1).values[..., -1:]
+    return x * (x.abs() >= threshold)
 
 
 def memory_chunking(num_mem_chunks: int) -> callable:
