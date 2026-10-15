@@ -74,6 +74,13 @@ def any_process(flag: bool, device: torch.device) -> bool:
     return bool(value.item())
 
 
+def from_main_process(flag: bool, device: torch.device) -> bool:
+    """The main process's flag, in every process (all of them must call it)."""
+    value = torch.tensor([float(flag)], device=device)
+    dist.broadcast(value, src=0)
+    return bool(value.item())
+
+
 def mean_over_processes(value: float, device: torch.device) -> float:
     """The mean of a number over the processes (all of them must call it)."""
     tensor = torch.tensor([value], dtype=torch.float64, device=device)
