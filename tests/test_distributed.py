@@ -124,3 +124,45 @@ def test_split_batch_keeps_the_tables_per_optimizer_step(batch_size, accumulate,
 def test_split_batch_refuses_uneven_splits():
     with pytest.raises(ValueError, match="cannot be split"):
         split_batch(1, 2, 4)
+
+
+def _widening_worker(rank, world_size, port, workdir):
+    """Each process with its own seed and its own tables; records which of its batches were widened."""
+    import tfmplayground.train as train_module
+    from tfmplayground.train import WideningConfig
+
+    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    os.chdir(workdir)
+    widened, real = [], train_module.add_mixed_widening_features
+    count = [0]
+
+    def spy(x, *args, **kwargs):
+        widened.append(count[0])
+        return real(x, *args, **kwargs)
+
+    train_module.add_mixed_widening_features = spy
+    batches = _batches(12)
+
+    class Prior(_Prior):
+        def __iter__(self):
+            for batch in self._batches:
+                yield batch
+                count[0] += 1
+
+    torch.manual_seed(100 + rank)  # different draws in each process
+    config = WideningConfig(cell_budget=200, width_min=5, width_max=10, min_rows=4, prob_no_widening=0.5)
+    train(_model(False), Prior(batches), nn.CrossEntropyLoss(), epochs=1, device=torch.device("cpu"),
+          run_name="ddp", distributed=DistributedContext(rank=rank, local_rank=rank, world_size=world_size),
+          widening=config)
+    torch.save(widened, os.path.join(workdir, f"widened{rank}.pt"))
+    dist.destroy_process_group()
+
+
+def test_processes_widen_the_same_batches(tmp_path, monkeypatch):
+    """With different random draws in each process, all widen at the same steps (the main process decides): a
+    step waits for its slowest process, so one wide table alone would leave the others idle."""
+    monkeypatch.chdir(tmp_path)
+    mp.spawn(_widening_worker, args=(2, _free_port(), str(tmp_path)), nprocs=2, join=True)
+    first, second = (torch.load(tmp_path / f"widened{r}.pt") for r in range(2))
+    assert first == second and 0 < len(first) < 12

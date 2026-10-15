@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from tfmplayground.augmentation import add_mixed_widening_features, inject_mcar_missingness, sparsify_columns
 from tfmplayground.callbacks import Callback
-from tfmplayground.distributed import DistributedContext, any_process, mean_over_processes
+from tfmplayground.distributed import DistributedContext, any_process, from_main_process, mean_over_processes
 from tfmplayground.models.nanotabpfn import NanoTabPFNModel
 from tfmplayground.normalization import compute_target_stats_torch, normalize_targets
 from tfmplayground.utils import autocast, get_default_device
@@ -41,7 +41,8 @@ class WideningConfig:
     # largest share of its columns made sparse (drawn uniformly up to it).
     sparse_columns_prob: float = 0.0
     sparse_columns_max_fraction: float = 1.0
-    # Cell budget (rows x columns) of a widened table, 0 = off. When set, a widened table's width is drawn
+    # Cell budget (rows x columns) of a widened table, 0 = off. A widened batch keeps its first table only (the budget
+    # is per table); narrow batches keep all their tables. When set, a widened table's width is drawn
     # log-uniformly in [width_min, width_max] (as many tables of 200-400 columns as of 5000-10000) and its rows
     # log-uniformly in [min_rows, min(its rows, cell_budget // width)]: the wider the table, the shorter, so that
     # every shape fits in memory (measured: ~4M cells per table on 80 GB, experiments/memory_budget.py).
@@ -214,12 +215,18 @@ def train(
                 # the sparsity/noise, then generate them per dataset (Algorithm 1 for continuous
                 # features, Algorithm 2 for categorical). No-op when disabled.
                 threshold = widening_threshold(widening, epoch) if widening is not None else 0.0
-                widen = (
-                    widening is not None
-                    and (widening.add_features_max > 0 or widening.cell_budget > 0)
-                    and (threshold == 0 or torch.rand(1).item() >= threshold)
-                )
+                widening_on = widening is not None and (widening.add_features_max > 0 or widening.cell_budget > 0)
+                widen = widening_on and (threshold == 0 or torch.rand(1).item() >= threshold)
+                if widening_on and distributed is not None:
+                    # all processes widen together (the main one decides): a step waits for its slowest process,
+                    # so one wide table in one process would leave the others idle
+                    widen = from_main_process(widen, device)
                 if widen and widening.cell_budget:
+                    if x.shape[0] > 1:
+                        # the budget is per table: a widened batch keeps one table (narrow batches keep all)
+                        x, y_all, target_all = x[:1], y_all[:1], target_all[:1]
+                        if full_data.get("categorical_mask") is not None:
+                            full_data = {**full_data, "categorical_mask": full_data["categorical_mask"][:1]}
                     # the width first, then the rows that fit with it; the widening adds the missing columns
                     width, rows = budget_shape(widening, x.shape[1])
                     if rows < x.shape[1]:

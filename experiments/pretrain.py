@@ -88,7 +88,7 @@ parser.add_argument("--cell-budget", type=int, default=0,
                          "drawn log-uniformly in [--widen-width-min, --widen-width-max] and at most "
                          "cell-budget / width rows (drawn log-uniformly from --min-rows): wider tables are shorter, "
                          "so every shape fits. "
-                         "~4M cells fit on 80 GB (experiments/memory_budget.py). Needs one table per batch per GPU; "
+                         "~4M cells fit on 80 GB (experiments/memory_budget.py). A widened batch keeps one table; "
                          "--add-features-max and --widen-max-rows are then not used")
 parser.add_argument("--widen-width-min", type=int, default=200, help="with --cell-budget: narrowest widened table")
 parser.add_argument("--widen-width-max", type=int, default=10000, help="with --cell-budget: widest widened table")
@@ -128,9 +128,10 @@ if tables_per_epoch % (world_size * batch_size * accumulate):
     step_tables = world_size * batch_size * accumulate
     parser.error(f"--tables-per-epoch {tables_per_epoch} must be a multiple of the {step_tables} tables of a step")
 NUM_STEPS = tables_per_epoch // (world_size * batch_size)  # batches per epoch of each process
-if args.cell_budget and batch_size != 1:
-    parser.error(f"--cell-budget is per table: give one table per batch per GPU (now {batch_size}); "
-                 "use --batch-size 1 and --accumulate for the tables per optimizer step")
+if args.cell_budget and batch_size * args.max_rows * args.max_features > args.cell_budget:
+    # widened batches keep one table; narrow ones keep batch_size tables of up to max-rows x max-features cells
+    parser.error(f"a narrow batch of {batch_size} tables x {args.max_rows} rows x {args.max_features} columns "
+                 f"exceeds --cell-budget {args.cell_budget}: lower the tables per GPU or --max-rows")
 if args.batch_size_per_gp and batch_size % args.batch_size_per_gp:
     parser.error(f"--batch-size-per-gp {args.batch_size_per_gp} must divide the {batch_size} tables per process")
 # Each process draws its own tables: the prior's seed is the run's seed plus the rank (rank 0 = a one-GPU run)

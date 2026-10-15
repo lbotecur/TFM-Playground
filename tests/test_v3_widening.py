@@ -175,3 +175,41 @@ def test_train_with_ramp_widens_nothing_in_the_first_epoch(tmp_path, monkeypatch
     config = WideningConfig(add_features_min=5, add_features_max=5, prob_no_widening=0.0, ramp_epochs=1)
     train(model, Prior(), nn.CrossEntropyLoss(), epochs=2, device=torch.device("cpu"), run_name="run", widening=config)
     assert len(calls) == 4  # epoch 1: none; epoch 2 (ramp over): every batch
+
+
+def test_cell_budget_widens_one_table_and_keeps_narrow_batches_whole(tmp_path, monkeypatch):
+    """With several tables per batch, a widened batch keeps its first table (the budget is per table); narrow
+    batches keep them all."""
+    import tfmplayground.train as train_module
+    from tfmplayground.train import WideningConfig
+
+    monkeypatch.chdir(tmp_path)
+    widened, seen = [], []
+    real_widen, real_forward = train_module.add_mixed_widening_features, NanoTabPFNModel.forward
+    monkeypatch.setattr(train_module, "add_mixed_widening_features",
+                        lambda x, *a, **k: widened.append(x.shape[0]) or real_widen(x, *a, **k))
+
+    def forward(self, *args, **kwargs):
+        seen.append(args[0][0].shape[0])
+        return real_forward(self, *args, **kwargs)
+
+    monkeypatch.setattr(NanoTabPFNModel, "forward", forward)
+    torch.manual_seed(0)
+    model = NanoTabPFNModel(embedding_size=16, num_attention_heads=2, mlp_hidden_size=32, num_layers=2, num_outputs=10)
+    x, y = torch.randn(3, 40, 4), torch.randint(0, 3, (3, 40)).float()
+    batches = [{"x": x, "y": y, "target_y": y.clone(), "train_test_split_index": 28}] * 8
+
+    class Prior:
+        num_steps = 8
+
+        def __iter__(self):
+            return iter(batches)
+
+        def __len__(self):
+            return 8
+
+    config = WideningConfig(cell_budget=800, width_min=10, width_max=20, min_rows=10, prob_no_widening=0.5)
+    train(model, Prior(), nn.CrossEntropyLoss(), epochs=1, device=torch.device("cpu"), run_name="run",
+          widening=config)
+    assert widened and all(n == 1 for n in widened)  # widened batches: one table
+    assert seen.count(3) == 8 - len(widened) and seen.count(1) == len(widened)  # narrow ones: all three
