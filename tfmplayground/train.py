@@ -1,15 +1,18 @@
 import os
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import schedulefree
 import torch
 from pfns.bar_distribution import FullSupportBarDistribution
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from tfmplayground.augmentation import add_mixed_widening_features, inject_mcar_missingness, sparsify_columns
 from tfmplayground.callbacks import Callback
+from tfmplayground.distributed import DistributedContext, any_process, mean_over_processes
 from tfmplayground.models.nanotabpfn import NanoTabPFNModel
 from tfmplayground.normalization import compute_target_stats_torch, normalize_targets
 from tfmplayground.utils import autocast, get_default_device
@@ -68,6 +71,7 @@ def train(
     log_every: int = 0,
     step_log_path: str | None = None,
     grad_clip: float = 1.0,
+    distributed: DistributedContext | None = None,
 ):
     """
     Trains our model on the given prior using the given criterion.
@@ -99,19 +103,37 @@ def train(
             and the fraction of optimizer steps clipped (norm > grad_clip). Waiting time near the window's time means
             the prior, not the GPU, limits training.
         grad_clip: (float) maximum gradient norm (clip_grad_norm_); 1.0 in all runs before 2026-10.
+        distributed: (DistributedContext, optional) this process's place when training on several GPUs with
+            torchrun (see tfmplayground.distributed): the model is wrapped in DistributedDataParallel, its
+            gradients are averaged over the processes at the end of each accumulation group, a batch with NaN
+            training targets is skipped by all processes together (so their accumulation groups stay aligned),
+            the logged losses are means over the processes, and only the main process logs and writes
+            checkpoints. Each process gets its own prior, and accumulate_gradients is per process.
 
     Returns:
         (torch.Tensor) a tensor of shape (num_rows, batch_size, num_features, embedding_size)
     """
     work_dir = "workdir/" + run_name
-    os.makedirs(work_dir, exist_ok=True)
-    if multi_gpu:
-        model = nn.DataParallel(model)
-    if callbacks is None:
+    is_main = distributed is None or distributed.is_main
+    if is_main:
+        os.makedirs(work_dir, exist_ok=True)
+    if multi_gpu and distributed is not None:
+        raise ValueError("multi_gpu (nn.DataParallel) and distributed (DistributedDataParallel) exclude each other")
+    if callbacks is None or not is_main:
         callbacks = []
     if not device:
         device = get_default_device()
     model.to(device)
+    core = model  # the model itself, for checkpoints and callbacks, whatever wraps it for training
+    if multi_gpu:
+        model = nn.DataParallel(model)
+    if distributed is not None:
+        model = DistributedDataParallel(model, device_ids=[device.index] if device.type == "cuda" else None)
+    world_size = distributed.world_size if distributed is not None else 1
+
+    def reduced(value: float) -> float:
+        """A loss to log: its mean over the processes when training on several."""
+        return mean_over_processes(value, device) if distributed is not None else value
     optimizer = schedulefree.AdamWScheduleFree(
         model.parameters(), lr=lr, weight_decay=0.0, warmup_steps=warmup_steps
     )
@@ -124,7 +146,7 @@ def train(
 
     mean_loss = float("nan")
     step_log = None
-    if step_log_path:
+    if step_log_path and is_main:
         new_file = not os.path.exists(step_log_path)
         step_log = open(step_log_path, "a")
         if new_file:
@@ -193,7 +215,11 @@ def train(
                 # Only guard the targets: features with NaNs are handled by the model
                 # (normalize_features imputes them and flags them via the indicator channel),
                 # so dropping feature-NaN batches would throw away trainable missing signal.
-                if torch.isnan(data[1]).any():
+                skip = bool(torch.isnan(data[1]).any())
+                if distributed is not None:
+                    # every process skips together, or their accumulation groups (and gradient averaging) drift
+                    skip = any_process(skip, device)
+                if skip:
                     continue
                 targets = target_all.to(device)
 
@@ -202,35 +228,42 @@ def train(
                     y_norm = normalize_targets(data[1], y_mean, y_std)
                     data = (data[0], y_norm)
 
-                # Mixed precision: matmuls/attention in amp_dtype, weights stay fp32. The loss is
-                # computed in fp32. bf16 has fp32's range, so no GradScaler is needed.
-                with autocast(device, amp_dtype):
-                    output = model(data, train_test_split_index=train_test_split_index)
-                output = output.float()
-                targets = targets[:, train_test_split_index:]
-                if regression_task:
-                    targets = normalize_targets(targets, y_mean, y_std)
-                if classification_task:
-                    targets = targets.reshape((-1,)).to(torch.long)
-                    output = output.view(-1, output.shape[-1])
+                # With several processes, gradients are averaged only on the batch that ends an accumulation
+                # group; the others accumulate locally (no_sync), which gives the same sum with fewer exchanges.
+                ends_group = (num_batches + 1) % accumulate_gradients == 0
+                sync = model.no_sync() if distributed is not None and not ends_group else nullcontext()
+                with sync:
+                    # Mixed precision: matmuls/attention in amp_dtype, weights stay fp32. The loss is
+                    # computed in fp32. bf16 has fp32's range, so no GradScaler is needed.
+                    with autocast(device, amp_dtype):
+                        output = model(data, train_test_split_index=train_test_split_index)
+                    output = output.float()
+                    targets = targets[:, train_test_split_index:]
+                    if regression_task:
+                        targets = normalize_targets(targets, y_mean, y_std)
+                    if classification_task:
+                        targets = targets.reshape((-1,)).to(torch.long)
+                        output = output.view(-1, output.shape[-1])
 
-                losses = criterion(output, targets)
-                loss = losses.mean() / accumulate_gradients
-                loss.backward()
+                    losses = criterion(output, targets)
+                    loss = losses.mean() / accumulate_gradients
+                    loss.backward()
                 total_loss += loss.cpu().detach().item() * accumulate_gradients
                 num_batches += 1
-                tables_seen += x.shape[0]
+                tables_seen += x.shape[0] * world_size
                 window_loss += loss.cpu().detach().item() * accumulate_gradients
                 if log_every and num_batches % log_every == 0:
                     elapsed = time.time() - epoch_start_time
-                    print(
-                        f"epoch {epoch} | batch {num_batches}/{len(prior)} | "
-                        f"loss {window_loss / log_every:.4f} | {elapsed:.0f}s | data wait {window_wait:.0f}s",
-                        flush=True,
-                    )
+                    window_mean = reduced(window_loss / log_every)
+                    if is_main:
+                        print(
+                            f"epoch {epoch} | batch {num_batches}/{len(prior)} | "
+                            f"loss {window_mean:.4f} | {elapsed:.0f}s | data wait {window_wait:.0f}s",
+                            flush=True,
+                        )
                     if step_log:
                         norms = torch.tensor(window_norms or [float("nan")])
-                        step_log.write(f"{epoch},{num_batches},{tables_seen},{window_loss / log_every:.5f},"
+                        step_log.write(f"{epoch},{num_batches},{tables_seen},{window_mean:.5f},"
                                        f"{window_wait:.2f},{elapsed:.1f},{norms.mean():.4f},"
                                        f"{(norms > grad_clip).float().mean():.3f}\n")
                         step_log.flush()
@@ -248,26 +281,27 @@ def train(
                     optimizer.zero_grad()
 
             end_time = time.time()
-            mean_loss = total_loss / max(num_batches, 1)
+            mean_loss = reduced(total_loss / max(num_batches, 1))
             model.eval()
             optimizer.eval()
 
-            training_state = {
-                "epoch": epoch,
-                "architecture": {
-                    "num_layers": int((model.module if multi_gpu else model).num_layers),
-                    "embedding_size": int((model.module if multi_gpu else model).embedding_size),
-                    "num_attention_heads": int((model.module if multi_gpu else model).num_attention_heads),
-                    "mlp_hidden_size": int((model.module if multi_gpu else model).mlp_hidden_size),
-                    "num_outputs": int((model.module if multi_gpu else model).num_outputs),
-                    "feature_clip": float((model.module if multi_gpu else model).feature_encoder.clip),
-                },
-                "model": (model.module if multi_gpu else model).state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
-            torch.save(training_state, work_dir + "/latest_checkpoint.pth")
-            if snapshot_every and epoch % snapshot_every == 0:
-                torch.save(training_state, f"{work_dir}/epoch_{epoch}.pth")
+            if is_main:
+                training_state = {
+                    "epoch": epoch,
+                    "architecture": {
+                        "num_layers": int(core.num_layers),
+                        "embedding_size": int(core.embedding_size),
+                        "num_attention_heads": int(core.num_attention_heads),
+                        "mlp_hidden_size": int(core.mlp_hidden_size),
+                        "num_outputs": int(core.num_outputs),
+                        "feature_clip": float(core.feature_encoder.clip),
+                    },
+                    "model": core.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                }
+                torch.save(training_state, work_dir + "/latest_checkpoint.pth")
+                if snapshot_every and epoch % snapshot_every == 0:
+                    torch.save(training_state, f"{work_dir}/epoch_{epoch}.pth")
 
             for callback in callbacks:
                 if type(criterion) is FullSupportBarDistribution:
@@ -275,12 +309,12 @@ def train(
                         epoch,
                         end_time - epoch_start_time,
                         mean_loss,
-                        (model.module if multi_gpu else model),
+                        core,
                         dist=criterion,
                     )
                 else:
                     callback.on_epoch_end(
-                        epoch, end_time - epoch_start_time, mean_loss, (model.module if multi_gpu else model)
+                        epoch, end_time - epoch_start_time, mean_loss, core
                     )
     except KeyboardInterrupt:
         pass
@@ -290,4 +324,4 @@ def train(
         for callback in callbacks:
             callback.close()
 
-    return (model.module if multi_gpu else model), mean_loss
+    return core, mean_loss
