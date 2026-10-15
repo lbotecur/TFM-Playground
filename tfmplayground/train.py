@@ -15,6 +15,7 @@ from tfmplayground.augmentation import add_mixed_widening_features, inject_mcar_
 from tfmplayground.callbacks import Callback
 from tfmplayground.distributed import DistributedContext, any_process, from_main_process, mean_over_processes
 from tfmplayground.models.nanotabpfn import NanoTabPFNModel
+from tfmplayground.sparsity import WeightSparsifier, WeightSparsity
 from tfmplayground.normalization import compute_target_stats_torch, normalize_targets
 from tfmplayground.utils import autocast, get_default_device
 
@@ -110,6 +111,7 @@ def train(
     step_log_path: str | None = None,
     grad_clip: float = 1.0,
     distributed: DistributedContext | None = None,
+    weight_sparsity: WeightSparsity | None = None,
 ):
     """
     Trains our model on the given prior using the given criterion.
@@ -147,6 +149,9 @@ def train(
             training targets is skipped by all processes together (so their accumulation groups stay aligned),
             the logged losses are means over the processes, and only the main process logs and writes
             checkpoints. Each process gets its own prior, and accumulate_gradients is per process.
+        weight_sparsity: (WeightSparsity, optional) weight-sparse training (tfmplayground/sparsity.py): after every
+            optimizer step each weight matrix keeps only its largest entries, their share falling from 1 to
+            weight_sparsity.density over the first part of the run. None or density 1 = dense, as before.
 
     Returns:
         (torch.Tensor) a tensor of shape (num_rows, batch_size, num_features, embedding_size)
@@ -177,6 +182,12 @@ def train(
     )
     if ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
+    sparsifier = None
+    if weight_sparsity is not None and weight_sparsity.density < 1.0:
+        steps_per_epoch = prior.num_steps // accumulate_gradients
+        start_epoch = ckpt["epoch"] if ckpt else 0
+        sparsifier = WeightSparsifier(core, optimizer, weight_sparsity, total_steps=epochs * steps_per_epoch,
+                                      start_step=start_epoch * steps_per_epoch)
     classification_task = isinstance(criterion, nn.CrossEntropyLoss)
     regression_task = not classification_task
 
@@ -332,6 +343,8 @@ def train(
                     # by the clipping, not by the learning rate.
                     window_norms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item())
                     optimizer.step()
+                    if sparsifier is not None:
+                        sparsifier.step()
                     optimizer.zero_grad()
 
             end_time = time.time()
@@ -349,6 +362,8 @@ def train(
                         "mlp_hidden_size": int(core.mlp_hidden_size),
                         "num_outputs": int(core.num_outputs),
                         "feature_clip": float(core.feature_encoder.clip),
+                        "norm": getattr(core, "norm", "layer"),
+                        "mlp_topk": float(getattr(core, "mlp_topk", 0.0)),
                     },
                     "model": core.state_dict(),
                     "optimizer": optimizer.state_dict(),

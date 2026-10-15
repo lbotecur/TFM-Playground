@@ -37,6 +37,7 @@ from tfmplayground.interface import _migrate_state_dict
 from tfmplayground.models.nanotabpfn import DEFAULT_FEATURE_CLIP, LEGACY_FEATURE_CLIP, NanoTabPFNModel
 from tfmplayground.priors.omics import OmicsPriorConfig
 from tfmplayground.priors.omics_loader import OmicsPriorDataLoader
+from tfmplayground.sparsity import WeightSparsity
 from tfmplayground.train import WideningConfig, train
 
 parser = argparse.ArgumentParser()
@@ -95,6 +96,24 @@ parser.add_argument("--widen-width-max", type=int, default=10000, help="with --c
 parser.add_argument("--widening-ramp-epochs", type=int, default=0,
                     help="epochs over which the share of widened batches rises from 0 to 1 - --prob-no-widening "
                          "(0 = from the start)")
+# Architecture (defaults: the 7.3M-parameter model of every run so far) and weight-sparse training
+# (tfmplayground/sparsity.py, after Gao et al. 2025, arXiv:2511.13653)
+parser.add_argument("--embedding-size", type=int, default=192)
+parser.add_argument("--num-heads", type=int, default=6)
+parser.add_argument("--mlp-hidden-size", type=int, default=768)
+parser.add_argument("--num-layers", type=int, default=12)
+parser.add_argument("--norm", default="layer", choices=["layer", "rms"],
+                    help="normalization of the blocks: layer (LayerNorm, all runs so far) or rms (RMSNorm, for "
+                         "weight-sparse models: no mean or bias, so zeros stay zeros)")
+parser.add_argument("--weight-density", type=float, default=1.0,
+                    help="fraction of nonzero entries kept in every weight matrix at the end of the annealing "
+                         "(1 = dense, off; e.g. 0.0625 keeps 1 in 16)")
+parser.add_argument("--density-anneal-fraction", type=float, default=0.5,
+                    help="share of the run over which the density falls linearly from 1 to --weight-density")
+parser.add_argument("--min-nonzeros-per-row", type=int, default=4,
+                    help="fewest nonzero inputs kept for every output neuron of a sparse matrix")
+parser.add_argument("--mlp-topk", type=float, default=0.0,
+                    help="fraction of the MLP hidden activations kept, the largest in magnitude (AbsTopK); 0 = all")
 parser.add_argument("--feature-clip", type=float, default=None,
                     help="bound of the normalized features, saved in the checkpoint. Default: 10 for a new run (100 in "
                          "all runs before v2); a resumed run keeps the one it was trained with")
@@ -198,11 +217,13 @@ else:
 if args.seed is not None:
     torch.manual_seed(args.seed)  # initial weights, and the widening and missing-value draws of train()
 model = NanoTabPFNModel(
-    embedding_size=192,
-    num_attention_heads=6,
-    mlp_hidden_size=768,
-    num_layers=12,
+    embedding_size=args.embedding_size,
+    num_attention_heads=args.num_heads,
+    mlp_hidden_size=args.mlp_hidden_size,
+    num_layers=args.num_layers,
     num_outputs=MAX_CLASSES,
+    norm=args.norm,
+    mlp_topk=args.mlp_topk,
 ).to(device)
 model.gradient_checkpointing = True
 if args.seed is not None and rank > 0:
@@ -269,6 +290,8 @@ trained_model, loss = train(
     grad_clip=args.clip,
     multi_gpu=args.multi_gpu,
     distributed=distributed,
+    weight_sparsity=WeightSparsity(density=args.weight_density, anneal_fraction=args.density_anneal_fraction,
+                                   min_per_row=args.min_nonzeros_per_row),
 )
 if is_main:
     print(f"Done. Checkpoint: workdir/{args.run_name}/latest_checkpoint.pth")

@@ -75,6 +75,8 @@ def init_model_from_state_dict_file(file_path):
         num_outputs=state_dict["architecture"]["num_outputs"],
         # checkpoints saved before the clip was configurable were all trained with 100
         feature_clip=state_dict["architecture"].get("feature_clip", LEGACY_FEATURE_CLIP),
+        norm=state_dict["architecture"].get("norm", "layer"),
+        mlp_topk=state_dict["architecture"].get("mlp_topk", 0.0),
     )
     model.load_state_dict(_migrate_state_dict(state_dict["model"]))
     # how the model is meant to be used at inference: shuffle the columns once (see _column_order); checkpoints
