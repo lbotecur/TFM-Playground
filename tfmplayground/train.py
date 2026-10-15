@@ -1,3 +1,4 @@
+import math
 import os
 import time
 from contextlib import nullcontext
@@ -40,6 +41,42 @@ class WideningConfig:
     # largest share of its columns made sparse (drawn uniformly up to it).
     sparse_columns_prob: float = 0.0
     sparse_columns_max_fraction: float = 1.0
+    # Cell budget (rows x columns) of a widened table, 0 = off. When set, a widened table's width is drawn
+    # log-uniformly in [width_min, width_max] (as many tables of 200-400 columns as of 5000-10000) and its rows
+    # log-uniformly in [min_rows, min(its rows, cell_budget // width)]: the wider the table, the shorter, so that
+    # every shape fits in memory (measured: ~4M cells per table on 80 GB, experiments/memory_budget.py).
+    # add_features_min/max and max_rows are then not used.
+    cell_budget: int = 0
+    width_min: int = 200
+    width_max: int = 10000
+    min_rows: int = 40
+    # Epochs over which the share of widened batches rises linearly from 0 to 1 - prob_no_widening (0 = no ramp):
+    # a model trained from scratch first learns on cheap narrow tables.
+    ramp_epochs: int = 0
+
+
+def widening_threshold(config: WideningConfig, epoch: int) -> float:
+    """A batch is widened when a uniform draw is >= this: prob_no_widening, raised during the ramp."""
+    if not config.ramp_epochs or epoch > config.ramp_epochs:
+        return config.prob_no_widening
+    return 1.0 - (1.0 - config.prob_no_widening) * (epoch - 1) / config.ramp_epochs
+
+
+def log_uniform_int(low: int, high: int) -> int:
+    """An integer drawn log-uniformly in [low, high] (torch's global generator)."""
+    if high <= low:
+        return int(low)
+    value = math.exp(math.log(low) + torch.rand(1).item() * (math.log(high) - math.log(low)))
+    return int(min(high, max(low, round(value))))
+
+
+def budget_shape(config: WideningConfig, num_rows: int) -> tuple[int, int]:
+    """Width and rows of a widened table under the cell budget, for a prior table of num_rows rows."""
+    width = log_uniform_int(config.width_min, config.width_max)
+    cap = max(3, min(num_rows, config.cell_budget // width))
+    rows = log_uniform_int(min(config.min_rows, cap), cap)
+    return width, rows
+
 
 def shorten_table(x: torch.Tensor, y: torch.Tensor, target_y: torch.Tensor, split: int, max_rows: int):
     """Keeps max_rows rows of a batch, the same share of training rows (at least 2) and of test rows (at least
@@ -176,19 +213,29 @@ def train(
                 # Feature widening (HDLSS prior): per batch, sample how many features to add and
                 # the sparsity/noise, then generate them per dataset (Algorithm 1 for continuous
                 # features, Algorithm 2 for categorical). No-op when disabled.
+                threshold = widening_threshold(widening, epoch) if widening is not None else 0.0
                 widen = (
                     widening is not None
-                    and widening.add_features_max > 0
-                    and (widening.prob_no_widening == 0 or torch.rand(1).item() >= widening.prob_no_widening)
+                    and (widening.add_features_max > 0 or widening.cell_budget > 0)
+                    and (threshold == 0 or torch.rand(1).item() >= threshold)
                 )
-                if widen and widening.max_rows and x.shape[1] > widening.max_rows:
-                    x, y_all, target_all, train_test_split_index = shorten_table(
-                        x, y_all, target_all, int(train_test_split_index), widening.max_rows
-                    )
-                if widen:
+                if widen and widening.cell_budget:
+                    # the width first, then the rows that fit with it; the widening adds the missing columns
+                    width, rows = budget_shape(widening, x.shape[1])
+                    if rows < x.shape[1]:
+                        x, y_all, target_all, train_test_split_index = shorten_table(
+                            x, y_all, target_all, int(train_test_split_index), rows
+                        )
+                    num_add = max(1, width - x.shape[2])
+                elif widen:
+                    if widening.max_rows and x.shape[1] > widening.max_rows:
+                        x, y_all, target_all, train_test_split_index = shorten_table(
+                            x, y_all, target_all, int(train_test_split_index), widening.max_rows
+                        )
                     num_add = int(
                         torch.randint(widening.add_features_min, widening.add_features_max + 1, (1,)).item()
                     )
+                if widen:
                     sparsity = torch.rand(1).item() * widening.sparsity_max
                     noise = torch.rand(1).item() * widening.noise_max
                     # graph_scm_raw gives the categorical columns (codes 0..K-1): use them instead of guessing,

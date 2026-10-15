@@ -79,6 +79,18 @@ parser.add_argument("--sparse-columns-prob", type=float, default=0.0,
                     help="probability that a widened batch gets sparse (zero-inflated) columns (0 in all runs before v3)")
 parser.add_argument("--sparse-columns-max-fraction", type=float, default=1.0,
                     help="largest share of a widened batch's columns made sparse")
+parser.add_argument("--cell-budget", type=int, default=0,
+                    help="cells (rows x columns) of a widened table, 0 = off. When set, a widened table gets a width "
+                         "drawn log-uniformly in [--widen-width-min, --widen-width-max] and at most "
+                         "cell-budget / width rows (drawn log-uniformly from --min-rows): wider tables are shorter, "
+                         "so every shape fits. "
+                         "~4M cells fit on 80 GB (experiments/memory_budget.py). Needs one table per batch per GPU; "
+                         "--add-features-max and --widen-max-rows are then not used")
+parser.add_argument("--widen-width-min", type=int, default=200, help="with --cell-budget: narrowest widened table")
+parser.add_argument("--widen-width-max", type=int, default=10000, help="with --cell-budget: widest widened table")
+parser.add_argument("--widening-ramp-epochs", type=int, default=0,
+                    help="epochs over which the share of widened batches rises from 0 to 1 - --prob-no-widening "
+                         "(0 = from the start)")
 parser.add_argument("--feature-clip", type=float, default=None,
                     help="bound of the normalized features, saved in the checkpoint. Default: 10 for a new run (100 in "
                          "all runs before v2); a resumed run keeps the one it was trained with")
@@ -108,6 +120,9 @@ device = torch.device(f"cuda:{distributed.local_rank if distributed else args.gp
 # Each process trains on its share of every optimizer step's tables: same tables per step and per epoch as one GPU
 batch_size, accumulate = split_batch(args.batch_size, args.accumulate, world_size)
 NUM_STEPS = 1000 * args.batch_size // (world_size * batch_size)  # batches per epoch of each process
+if args.cell_budget and batch_size != 1:
+    parser.error(f"--cell-budget is per table: give one table per batch per GPU (now {batch_size}); "
+                 "use --batch-size 1 and --accumulate for the tables per optimizer step")
 if args.batch_size_per_gp and batch_size % args.batch_size_per_gp:
     parser.error(f"--batch-size-per-gp {args.batch_size_per_gp} must divide the {batch_size} tables per process")
 # Each process draws its own tables: the prior's seed is the run's seed plus the rank (rank 0 = a one-GPU run)
@@ -217,6 +232,11 @@ widening = WideningConfig(
     max_rows=args.widen_max_rows,
     sparse_columns_prob=args.sparse_columns_prob,
     sparse_columns_max_fraction=args.sparse_columns_max_fraction,
+    cell_budget=args.cell_budget,
+    width_min=args.widen_width_min,
+    width_max=args.widen_width_max,
+    min_rows=args.min_rows,
+    ramp_epochs=args.widening_ramp_epochs,
 )
 
 trained_model, loss = train(
