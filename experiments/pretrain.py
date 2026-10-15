@@ -10,6 +10,10 @@ Ejemplos, desde la raíz del repo:
     # prior ómico (ya ensancha él: --max-features es su ancho total máximo y train() no ensancha):
     nohup python -u experiments/pretrain.py --gpu 6 --run-name omics --prior-type omics --max-features 5000 \\
         > workdir/omics.log 2>&1 &
+    # on 4 GPUs (DistributedDataParallel, see tfmplayground/distributed.py): the same recipe, ~4x faster; the
+    # GPUs are chosen with CUDA_VISIBLE_DEVICES (--gpu is ignored), --workers is per GPU
+    CUDA_VISIBLE_DEVICES=0,2,3,5 nohup torchrun --standalone --nproc_per_node 4 experiments/pretrain.py \\
+        --run-name mix_scm --prior-type mix_scm --workers 4 > workdir/mix_scm.log 2>&1 &
 """
 
 import os
@@ -27,6 +31,7 @@ import torch
 from torch import nn
 
 from tfmplayground.callbacks import ConsoleLoggerCallback
+from tfmplayground.distributed import init_distributed, split_batch
 from tfmplayground.external_priors import TabICLPriorDataLoader
 from tfmplayground.interface import _migrate_state_dict
 from tfmplayground.models.nanotabpfn import DEFAULT_FEATURE_CLIP, LEGACY_FEATURE_CLIP, NanoTabPFNModel
@@ -78,8 +83,8 @@ parser.add_argument("--feature-clip", type=float, default=None,
                     help="bound of the normalized features, saved in the checkpoint. Default: 10 for a new run (100 in "
                          "all runs before v2); a resumed run keeps the one it was trained with")
 parser.add_argument("--multi-gpu", action="store_true",
-                    help="split each batch over every visible GPU (nn.DataParallel); choose them with "
-                         "CUDA_VISIBLE_DEVICES and leave --gpu at 0. Each GPU gets batch-size / GPUs tables")
+                    help="old: split each batch over every visible GPU (nn.DataParallel); it gave different results. "
+                         "Launch with torchrun instead (see the examples above)")
 parser.add_argument("--no-log-seq-len", action="store_true",
                     help="rows per table uniform in [min-rows, max-rows] instead of log-uniform")
 args = parser.parse_args()
@@ -93,7 +98,23 @@ if args.prior_type == "omics":
     args.add_features_max = 0  # el prior ómico ya ensancha; train() no vuelve a ensanchar
 
 os.chdir(Path(__file__).resolve().parents[1])  # workdir/ siempre en la raíz del repo
-device = torch.device(f"cuda:{args.gpu}")
+# Launched by torchrun: one process per GPU, each on the GPU of its local rank (see tfmplayground/distributed.py)
+distributed = init_distributed()
+rank, world_size = (distributed.rank, distributed.world_size) if distributed else (0, 1)
+is_main = rank == 0
+if distributed is not None and args.multi_gpu:
+    parser.error("--multi-gpu (nn.DataParallel) cannot be combined with torchrun")
+device = torch.device(f"cuda:{distributed.local_rank if distributed else args.gpu}")
+# Each process trains on its share of every optimizer step's tables: same tables per step and per epoch as one GPU
+batch_size, accumulate = split_batch(args.batch_size, args.accumulate, world_size)
+NUM_STEPS = 1000 * args.batch_size // (world_size * batch_size)  # batches per epoch of each process
+if args.batch_size_per_gp and batch_size % args.batch_size_per_gp:
+    parser.error(f"--batch-size-per-gp {args.batch_size_per_gp} must divide the {batch_size} tables per process")
+# Each process draws its own tables: the prior's seed is the run's seed plus the rank (rank 0 = a one-GPU run)
+prior_seed = None if args.seed is None else args.seed + rank
+if world_size > 1 and is_main:
+    print(f"{world_size} processes: {batch_size} tables x {accumulate} batches per optimizer step each, "
+          f"{NUM_STEPS} batches per epoch each", flush=True)
 
 # Guarda los parámetros del run junto a sus checkpoints
 run_dir = Path("workdir") / args.run_name
@@ -104,17 +125,19 @@ started = datetime.now().strftime("%Y%m%d-%H%M%S")
 git = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True).stdout.strip()
 record = {**vars(args), "command": " ".join(sys.argv), "git_commit": git("rev-parse", "HEAD"),
           "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no")), "started": started}
-(run_dir / f"args_{started}.json").write_text(json.dumps(record, indent=2))
-if not (run_dir / "args.json").exists():
-    (run_dir / "args.json").write_text(json.dumps(record, indent=2))
+record["world_size"] = world_size
+if is_main:
+    (run_dir / f"args_{started}.json").write_text(json.dumps(record, indent=2))
+    if not (run_dir / "args.json").exists():
+        (run_dir / "args.json").write_text(json.dumps(record, indent=2))
 
 MAX_CLASSES = 10
 
 if args.prior_type == "omics":
     # Ancho total log-uniforme hasta --max-features; --min-features no aplica (10-60 variables base)
     prior = OmicsPriorDataLoader(
-        num_steps=1000,
-        batch_size=args.batch_size,
+        num_steps=NUM_STEPS,
+        batch_size=batch_size,
         device=device,
         config=OmicsPriorConfig(
             min_rows=args.min_rows,
@@ -127,8 +150,8 @@ if args.prior_type == "omics":
     )
 else:
     prior = TabICLPriorDataLoader(
-        num_steps=1000,  # batches por época
-        batch_size=args.batch_size,
+        num_steps=NUM_STEPS,  # batches por época
+        batch_size=batch_size,
         num_datapoints_min=args.min_rows,
         num_datapoints_max=args.max_rows,
         min_features=args.min_features,
@@ -145,7 +168,7 @@ else:
         graph_fct_types=args.graph_fct_types,
         graph_filter_graphs=args.filter_graphs,
         graph_filter_datasets=args.filter_datasets,
-        seed=args.seed,
+        seed=prior_seed,
     )
 
 if args.seed is not None:
@@ -158,6 +181,8 @@ model = NanoTabPFNModel(
     num_outputs=MAX_CLASSES,
 ).to(device)
 model.gradient_checkpointing = True
+if args.seed is not None and rank > 0:
+    torch.manual_seed(args.seed + rank)  # same initial weights, but each process's own widening and missing draws
 
 ckpt = None
 if args.resume:
@@ -178,7 +203,8 @@ elif ckpt is not None:
 else:
     feature_clip = DEFAULT_FEATURE_CLIP
 model.feature_encoder.clip = float(feature_clip)
-print(f"feature clip: {feature_clip:g}", flush=True)
+if is_main:
+    print(f"feature clip: {feature_clip:g}", flush=True)
 
 widening = WideningConfig(
     add_features_min=200,
@@ -198,7 +224,7 @@ trained_model, loss = train(
     prior=prior,
     criterion=nn.CrossEntropyLoss(),
     epochs=args.epochs,
-    accumulate_gradients=args.accumulate,
+    accumulate_gradients=accumulate,
     lr=args.lr,
     device=device,
     callbacks=[ConsoleLoggerCallback()],
@@ -213,5 +239,9 @@ trained_model, loss = train(
     step_log_path=str(run_dir / "steps.csv"),
     grad_clip=args.clip,
     multi_gpu=args.multi_gpu,
+    distributed=distributed,
 )
-print(f"Done. Checkpoint: workdir/{args.run_name}/latest_checkpoint.pth")
+if is_main:
+    print(f"Done. Checkpoint: workdir/{args.run_name}/latest_checkpoint.pth")
+if distributed is not None:
+    torch.distributed.destroy_process_group()
