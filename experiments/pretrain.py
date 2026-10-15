@@ -79,6 +79,10 @@ parser.add_argument("--sparse-columns-prob", type=float, default=0.0,
                     help="probability that a widened batch gets sparse (zero-inflated) columns (0 in all runs before v3)")
 parser.add_argument("--sparse-columns-max-fraction", type=float, default=1.0,
                     help="largest share of a widened batch's columns made sparse")
+parser.add_argument("--tables-per-epoch", type=int, default=None,
+                    help="tables per epoch, over all GPUs (an epoch is when a checkpoint is saved). Default 1000 x "
+                         "--batch-size: 8000 for the base recipes (8 x 1), 1000 for the widening ones (1 x 8). Give "
+                         "8000 with --batch-size 1 --accumulate 8 to count epochs as the base recipes do")
 parser.add_argument("--cell-budget", type=int, default=0,
                     help="cells (rows x columns) of a widened table, 0 = off. When set, a widened table gets a width "
                          "drawn log-uniformly in [--widen-width-min, --widen-width-max] and at most "
@@ -119,7 +123,11 @@ if distributed is not None and args.multi_gpu:
 device = torch.device(f"cuda:{distributed.local_rank if distributed else args.gpu}")
 # Each process trains on its share of every optimizer step's tables: same tables per step and per epoch as one GPU
 batch_size, accumulate = split_batch(args.batch_size, args.accumulate, world_size)
-NUM_STEPS = 1000 * args.batch_size // (world_size * batch_size)  # batches per epoch of each process
+tables_per_epoch = args.tables_per_epoch or 1000 * args.batch_size
+if tables_per_epoch % (world_size * batch_size * accumulate):
+    step_tables = world_size * batch_size * accumulate
+    parser.error(f"--tables-per-epoch {tables_per_epoch} must be a multiple of the {step_tables} tables of a step")
+NUM_STEPS = tables_per_epoch // (world_size * batch_size)  # batches per epoch of each process
 if args.cell_budget and batch_size != 1:
     parser.error(f"--cell-budget is per table: give one table per batch per GPU (now {batch_size}); "
                  "use --batch-size 1 and --accumulate for the tables per optimizer step")
