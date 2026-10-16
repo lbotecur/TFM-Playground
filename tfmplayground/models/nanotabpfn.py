@@ -281,6 +281,19 @@ class TargetEncoder(nn.Module):
         return self.linear_layer(pad_targets(y_train, num_rows))
 
 
+class FP32RMSNorm(nn.RMSNorm):
+    """RMSNorm computed in fp32, as autocast computes LayerNorm on the GPU.
+
+    Under CUDA autocast, layer_norm is run in fp32 (an autocast fp32 op), but rms_norm is not on that list: it gets
+    a bf16 input with fp32 weights, warns ("Mismatch dtype between input and weight") and falls back to a slower,
+    less accurate bf16 path. Normalizing in fp32 gives RMSNorm the precision and output dtype of LayerNorm, so the
+    two norms differ only in what they compute. Same parameters as nn.RMSNorm.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.rms_norm(x.float(), self.normalized_shape, self.weight, self.eps)
+
+
 class TransformerEncoderLayer(nn.Module):
     """
     Modified version of older version of https://github.com/pytorch/pytorch/blob/v2.6.0/torch/nn/modules/transformer.py#L630
@@ -301,7 +314,7 @@ class TransformerEncoderLayer(nn.Module):
         super().__init__()
         if norm not in ("layer", "rms"):
             raise ValueError(f"norm must be 'layer' or 'rms', got {norm!r}")
-        Norm = LayerNorm if norm == "layer" else nn.RMSNorm  # noqa: N806
+        Norm = LayerNorm if norm == "layer" else FP32RMSNorm  # noqa: N806
         # hidden activations kept by the MLP (AbsTopK), 0 = all
         self.mlp_keep = round(mlp_topk * mlp_hidden_size) if mlp_topk > 0 else 0
         self.self_attention_between_datapoints = MultiheadAttention(

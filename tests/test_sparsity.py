@@ -113,3 +113,24 @@ def test_default_model_is_unchanged():
     assert model.norm == "layer" and model.mlp_topk == 0.0
     assert "transformer_blocks.0.norm1.bias" in model.state_dict()
     assert all(block.mlp_keep == 0 for block in model.transformer_blocks)
+
+
+def test_rmsnorm_runs_in_fp32_under_autocast():
+    # as LayerNorm under CUDA autocast: fp32 output, no dtype-mismatch fallback, the fp32 result
+    import warnings
+
+    from tfmplayground.models.nanotabpfn import FP32RMSNorm
+
+    norm = FP32RMSNorm(16)
+    nn.init.normal_(norm.weight)
+    x = torch.randn(5, 16).to(torch.bfloat16)
+    with torch.autocast("cpu", dtype=torch.bfloat16), warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = norm(x)
+    assert out.dtype == torch.float32
+    expected = torch.nn.functional.rms_norm(x.float(), (16,), norm.weight, norm.eps)
+    assert torch.equal(out, expected)
+    plain = nn.RMSNorm(16)
+    plain.load_state_dict(norm.state_dict())  # same parameters: checkpoints load either way
+    y = torch.randn(5, 16)
+    assert torch.allclose(norm(y), plain(y))
