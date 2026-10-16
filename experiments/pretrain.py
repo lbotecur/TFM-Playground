@@ -37,6 +37,8 @@ from tfmplayground.interface import _migrate_state_dict
 from tfmplayground.models.nanotabpfn import DEFAULT_FEATURE_CLIP, LEGACY_FEATURE_CLIP, NanoTabPFNModel
 from tfmplayground.priors.omics import OmicsPriorConfig
 from tfmplayground.priors.omics_loader import OmicsPriorDataLoader
+from tfmplayground.priors.omics_mechanisms import MechanismPriorConfig
+from tfmplayground.priors.omics_mechanisms_loader import MixedOmicsPrior
 from tfmplayground.sparsity import WeightSparsity
 from tfmplayground.train import WideningConfig, train
 
@@ -114,6 +116,11 @@ parser.add_argument("--min-nonzeros-per-row", type=int, default=4,
                     help="fewest nonzero inputs kept for every output neuron of a sparse matrix")
 parser.add_argument("--mlp-topk", type=float, default=0.0,
                     help="fraction of the MLP hidden activations kept, the largest in magnitude (AbsTopK); 0 = all")
+parser.add_argument("--omics-fraction", type=float, default=0.0,
+                    help="share of the batches replaced by tables of the mechanism omics prior "
+                         "(priors/omics_mechanisms.py), never widened again; 0 = off. Needs --batch-size 1")
+parser.add_argument("--omics-max-features", type=int, default=3000,
+                    help="widest omics table (its rows follow --min-rows/--max-rows)")
 parser.add_argument("--feature-clip", type=float, default=None,
                     help="bound of the normalized features, saved in the checkpoint. Default: 10 for a new run (100 in "
                          "all runs before v2); a resumed run keeps the one it was trained with")
@@ -213,6 +220,19 @@ else:
         graph_filter_datasets=args.filter_datasets,
         seed=prior_seed,
     )
+
+if args.omics_fraction > 0:
+    if args.prior_type == "omics":
+        parser.error("--omics-fraction mixes omics tables into another prior, not into --prior-type omics")
+    if distributed is not None:
+        parser.error("--omics-fraction is for one-process runs (each process would draw its own omics batches)")
+    if batch_size != 1:
+        parser.error("--omics-fraction needs --batch-size 1: omics tables are up to --omics-max-features wide")
+    prior = MixedOmicsPrior(
+        prior, args.omics_fraction, MechanismPriorConfig(min_rows=args.min_rows, max_rows=args.max_rows,
+                                                         max_total_features=args.omics_max_features),
+        batch_size=batch_size, device=device, seed=None if prior_seed is None else prior_seed + 7919,
+    )  # fmt: skip
 
 if args.seed is not None:
     torch.manual_seed(args.seed)  # initial weights, and the widening and missing-value draws of train()
