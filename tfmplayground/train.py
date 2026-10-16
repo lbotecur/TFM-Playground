@@ -232,6 +232,8 @@ def train(
                     # all processes widen together (the main one decides): a step waits for its slowest process,
                     # so one wide table in one process would leave the others idle
                     widen = from_main_process(widen, device)
+                if full_data.get("pre_widened"):
+                    widen = False  # already wide (e.g. omics tables, see priors/omics_mechanisms_loader.py)
                 if widen and widening.cell_budget:
                     if x.shape[0] > 1:
                         # the budget is per table: a widened batch keeps one table (narrow batches keep all)
